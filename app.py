@@ -5,7 +5,7 @@ import re
 import io
 from datetime import datetime
 
-st.set_page_config(page_title="BuddyAI - Foolproof Bank Converter", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="BuddyAI - Master Bank Statement Engine", page_icon="🤖", layout="wide")
 
 # Login Check
 if 'authenticated' not in st.session_state:
@@ -24,8 +24,26 @@ if not st.session_state.authenticated:
     st.stop()
 
 # App Header
-st.title("🤖 BuddyAI - Foolproof Bank Statement Converter")
-st.write("Production Engine: Dual-Mode Multi-Page Extractor (0 Pages Missed) & Mathematical Closing Balance Audit.")
+st.title("🤖 BuddyAI - Universal Bank Statement Converter")
+st.write("Production Engine: Complete Multi-Page Extraction, Manual Bank Overrides & Full Financial Audit.")
+
+# Bank Selection Dropdown (Manual + Auto-Detect)
+bank_option = st.selectbox(
+    "🏦 Select Bank Format / Engine:",
+    [
+        "Auto-Detect Bank Format",
+        "Kotak Mahindra Bank",
+        "ICICI Bank",
+        "HDFC Bank",
+        "State Bank of India (SBI)",
+        "Punjab National Bank (PNB)",
+        "Bank of Baroda (BOB)",
+        "Canara Bank",
+        "Union Bank of India",
+        "Axis Bank",
+        "Universal / General Bank"
+    ]
+)
 
 # User Inputs
 tally_bank_ledger = st.text_input("🏦 Tally Bank Ledger Name (Exact Tally Name):", value="Bank Account")
@@ -139,7 +157,7 @@ def process_pdf_multi_page_foolproof(pdf_file, password=None):
         for page_idx, page in enumerate(pdf.pages):
             page_extracted_rows = []
             
-            # METHOD 1: STRUCTURED TABLE EXTRACTION
+            # --- METHOD 1: STRUCTURED TABLE EXTRACTION ---
             tables = page.extract_tables()
             if tables:
                 for table in tables:
@@ -173,8 +191,11 @@ def process_pdf_multi_page_foolproof(pdf_file, password=None):
                         if "opening balance" in row_text.lower() or "b/f" in row_text.lower():
                             amts = strict_amount_pattern.findall(row_text)
                             if amts and opening_balance is None:
-                                opening_balance = float(amts[-1].replace(',', ''))
-                                running_balance = opening_balance
+                                try:
+                                    opening_balance = float(amts[-1].replace(',', ''))
+                                    running_balance = opening_balance
+                                except ValueError:
+                                    pass
                             continue
 
                         date_match = date_pattern.search(row_text)
@@ -240,10 +261,10 @@ def process_pdf_multi_page_foolproof(pdf_file, password=None):
                                 "Date_Display": last_valid_date,
                                 "Narration": narration,
                                 "VoucherType": vch_type,
-                                "Amount": tx_amount
+                                "Amount": float(tx_amount)
                             })
 
-            # METHOD 2: FALLBACK TEXT EXTRACTION
+            # --- METHOD 2: FALLBACK TEXT EXTRACTION ---
             if not page_extracted_rows:
                 text = page.extract_text(layout=False)
                 if text:
@@ -259,8 +280,11 @@ def process_pdf_multi_page_foolproof(pdf_file, password=None):
                         if "opening balance" in line.lower() or "b/f" in line.lower():
                             amts = strict_amount_pattern.findall(line)
                             if amts and opening_balance is None:
-                                opening_balance = float(amts[-1].replace(',', ''))
-                                running_balance = opening_balance
+                                try:
+                                    opening_balance = float(amts[-1].replace(',', ''))
+                                    running_balance = opening_balance
+                                except ValueError:
+                                    pass
                             continue
 
                         d_match = date_pattern.search(line)
@@ -330,7 +354,7 @@ def process_pdf_multi_page_foolproof(pdf_file, password=None):
                                 "Date_Display": d_str,
                                 "Narration": final_n,
                                 "VoucherType": vch_type,
-                                "Amount": tx_amt
+                                "Amount": float(tx_amt)
                             })
 
             parsed_rows.extend(page_extracted_rows)
@@ -356,7 +380,7 @@ def generate_balanced_tally_xml(rows, bank_ledger):
         tally_date = r["Date_Tally"]
         narration = str(r["Narration"]).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;').replace("'", '&apos;')
         vch_type = r["VoucherType"]
-        amt = r["Amount"]
+        amt = float(r["Amount"])
         amt_str = f"{amt:.2f}"
         
         xml_lines.append('        <TALLYMESSAGE xmlns:UDF="TallyUDF">')
@@ -401,37 +425,23 @@ def generate_balanced_tally_xml(rows, bank_ledger):
 
 # Execution
 if uploaded_file is not None:
-    st.info("⌛ Extracting All Pages with Dual-Mode Engine...")
+    st.info("⌛ Extracting All Pages with Universal Engine...")
     
-    bank_name, bank_class, is_scanned, status = detect_bank_and_type(uploaded_file, password=pdf_password)
+    if bank_option == "Auto-Detect Bank Format":
+        bank_name, bank_class, is_scanned, status = detect_bank_and_type(uploaded_file, password=pdf_password)
+    else:
+        bank_name = bank_option
+        bank_class = "Class A"
+        is_scanned = False
+        status = "OK"
     
     if status == "ERROR_PASSWORD":
         st.error("🔒 PDF is Password Protected! Please enter the correct password in the box above.")
     else:
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.success(f"🏦 Bank Name: **{bank_name}**")
+            st.success(f"🏦 Selected/Detected Bank: **{bank_name}**")
         with c2:
-            st.info(f"🏷️ Layout Category: **{bank_class}**")
+            st.info(f"🏷️ Engine Category: **{bank_class}**")
         with c3:
-            if is_scanned:
-                st.warning("🖼️ Format: **Scanned PDF (OCR Required)**")
-            else:
-                st.success("📄 Format: **Digital Text PDF**")
-
-        rows, op_bal, cl_bal = process_pdf_multi_page_foolproof(uploaded_file, password=pdf_password)
-        
-        if rows:
-            df_preview = pd.DataFrame(rows)
-            
-            st.markdown("---")
-            st.subheader("📊 Pre-Import Mathematical Audit Dashboard")
-            
-            total_receipts = df_preview[df_preview['VoucherType'] == 'Receipt']['Amount'].sum()
-            total_payments = df_preview[df_preview['VoucherType'] == 'Payment']['Amount'].sum()
-            total_count = len(df_preview)
-            
-            calc_closing = (op_bal if op_bal is not None else 0.0) + total_receipts - total_payments
-            
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Total Extracted Vouchers", f"{total_count} Vouchers")
+            if is_sc
