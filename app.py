@@ -25,7 +25,7 @@ if not st.session_state.authenticated:
 
 # App Header
 st.title("🤖 BuddyAI - Universal Bank Statement Converter")
-st.write("Production Engine: Complete Multi-Page Extraction, Manual Bank Overrides & Full Financial Audit.")
+st.write("Fast Multi-Bank Engine: Instant Processing, Manual Bank Override & Full Financial Audit.")
 
 # Bank Selection Dropdown
 bank_option = st.selectbox(
@@ -45,7 +45,6 @@ bank_option = st.selectbox(
     ]
 )
 
-# User Inputs
 tally_bank_ledger = st.text_input("🏦 Tally Bank Ledger Name (Exact Tally Name):", value="Bank Account")
 pdf_password = st.text_input("🔑 PDF Password (If protected, enter password here):", type="password")
 uploaded_file = st.file_uploader("📂 Upload PDF Bank Statement (Multi-page supported)", type=["pdf"])
@@ -135,7 +134,7 @@ def clean_amount(val_str):
             return 0.0
     return 0.0
 
-def process_pdf_multi_page_foolproof(pdf_file, password=None):
+def process_pdf_fast_multi_page(pdf_file, password=None):
     date_pattern = re.compile(r'\b(0?[1-9]|[12][0-9]|3[01])[\/\-\.](0?[1-9]|1[0-2]|[A-Za-z]{3}|\d{1,2})[\/\-\.](20\d{2}|\d{2})\b')
     strict_amount_pattern = re.compile(r'\b\d+(?:,\d+)*\.\d{2}(?!\.\d)\b')
 
@@ -152,210 +151,99 @@ def process_pdf_multi_page_foolproof(pdf_file, password=None):
     closing_balance_detected = None
 
     with pdfplumber.open(pdf_file, password=password if password else None) as pdf:
-        for page_idx, page in enumerate(pdf.pages):
-            page_extracted_rows = []
+        for page in pdf.pages:
+            text = page.extract_text(layout=False)
+            if not text:
+                continue
+
+            lines = [l.strip() for l in text.split('\n') if l.strip() and not any(kw in l.lower() for kw in ignore_keywords)]
             
-            # METHOD 1: STRUCTURED TABLE EXTRACTION
-            tables = page.extract_tables()
-            if tables:
-                for table in tables:
-                    if not table or len(table) < 1:
-                        continue
-                    
-                    dr_col, cr_col, bal_col = -1, -1, -1
+            current_tx = None
+            grouped_txs = []
 
-                    for row in table[:3]:
-                        row_str = [str(c).lower().strip() if c else "" for c in row]
-                        for idx, cell in enumerate(row_str):
-                            if any(k in cell for k in ['withdrawal', 'debit', 'dr']):
-                                dr_col = idx
-                            elif any(k in cell for k in ['deposit', 'credit', 'cr']):
-                                cr_col = idx
-                            elif 'balance' in cell:
-                                bal_col = idx
+            for line in lines:
+                if re.search(r'^page\s+\d+(\s+of\s+\d+)?$', line.lower().strip()):
+                    continue
 
-                    for row in table:
-                        if not row:
-                            continue
-                        
-                        row_cells = [str(c).replace('\n', ' ').strip() if c is not None else "" for c in row]
-                        row_text = " ".join(row_cells)
+                if "opening balance" in line.lower() or "b/f" in line.lower():
+                    amts = strict_amount_pattern.findall(line)
+                    if amts and opening_balance is None:
+                        try:
+                            opening_balance = float(amts[-1].replace(',', ''))
+                            running_balance = opening_balance
+                        except ValueError:
+                            pass
+                    continue
 
-                        if any(kw in row_text.lower() for kw in ignore_keywords):
-                            continue
-                        if re.search(r'^page\s+\d+(\s+of\s+\d+)?$', row_text.lower().strip()):
-                            continue
+                d_match = date_pattern.search(line)
+                is_new = False
+                if d_match:
+                    if current_tx:
+                        c_text = " ".join(current_tx["lines"])
+                        if len(strict_amount_pattern.findall(c_text)) > 0:
+                            is_new = True
 
-                        if "opening balance" in row_text.lower() or "b/f" in row_text.lower():
-                            amts = strict_amount_pattern.findall(row_text)
-                            if amts and opening_balance is None:
-                                try:
-                                    opening_balance = float(amts[-1].replace(',', ''))
-                                    running_balance = opening_balance
-                                except ValueError:
-                                    pass
-                            continue
-
-                        date_match = date_pattern.search(row_text)
-                        if date_match:
-                            match_start = date_match.start()
-                            if match_start == 0 or row_text[match_start - 1] in [' ', '\t', '|', ':', '-']:
-                                last_valid_date = date_match.group(0)
-
-                        numeric_cells = []
-                        narr_words = []
-
-                        for c_idx, cell in enumerate(row_cells):
-                            if date_pattern.search(cell):
-                                continue
-                            amt = clean_amount(cell)
-                            if amt > 0 and ('.' in cell or len(cell) > 3):
-                                numeric_cells.append((c_idx, amt))
-                            elif cell and not re.match(r'^\d+$', cell):
-                                narr_words.append(cell)
-
-                        if not numeric_cells:
-                            continue
-
-                        vch_type = "Receipt"
-                        tx_amount = 0.0
-
-                        if dr_col != -1 and dr_col < len(row_cells) and clean_amount(row_cells[dr_col]) > 0:
-                            tx_amount = clean_amount(row_cells[dr_col])
-                            vch_type = "Payment"
-                            if bal_col != -1 and bal_col < len(row_cells):
-                                running_balance = clean_amount(row_cells[bal_col])
-                        elif cr_col != -1 and cr_col < len(row_cells) and clean_amount(row_cells[cr_col]) > 0:
-                            tx_amount = clean_amount(row_cells[cr_col])
-                            vch_type = "Receipt"
-                            if bal_col != -1 and bal_col < len(row_cells):
-                                running_balance = clean_amount(row_cells[bal_col])
-                        elif len(numeric_cells) >= 2:
-                            tx_amount = numeric_cells[-2][1]
-                            curr_bal = numeric_cells[-1][1]
-                            
-                            if running_balance is not None:
-                                diff = round(curr_bal - running_balance, 2)
-                                if diff < -0.01:
-                                    vch_type = "Payment"
-                                elif diff > 0.01:
-                                    vch_type = "Receipt"
-                                else:
-                                    vch_type = "Payment" if any(k in row_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
-                            else:
-                                vch_type = "Payment" if any(k in row_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
-                            
-                            running_balance = curr_bal
-                            closing_balance_detected = curr_bal
-                        elif len(numeric_cells) == 1:
-                            tx_amount = numeric_cells[0][1]
-                            vch_type = "Payment" if any(k in row_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
-
-                        narration = " ".join(narr_words) if narr_words else "Bank Entry"
-
-                        if tx_amount > 0:
-                            page_extracted_rows.append({
-                                "Date_Tally": parse_tally_date(last_valid_date),
-                                "Date_Display": last_valid_date,
-                                "Narration": narration,
-                                "VoucherType": vch_type,
-                                "Amount": float(tx_amount)
-                            })
-
-            # METHOD 2: FALLBACK TEXT EXTRACTION
-            if not page_extracted_rows:
-                text = page.extract_text(layout=False)
-                if text:
-                    lines = [l.strip() for l in text.split('\n') if l.strip() and not any(kw in l.lower() for kw in ignore_keywords)]
-                    
-                    current_tx = None
-                    grouped_txs = []
-
-                    for line in lines:
-                        if re.search(r'^page\s+\d+(\s+of\s+\d+)?$', line.lower().strip()):
-                            continue
-
-                        if "opening balance" in line.lower() or "b/f" in line.lower():
-                            amts = strict_amount_pattern.findall(line)
-                            if amts and opening_balance is None:
-                                try:
-                                    opening_balance = float(amts[-1].replace(',', ''))
-                                    running_balance = opening_balance
-                                except ValueError:
-                                    pass
-                            continue
-
-                        d_match = date_pattern.search(line)
-                        is_new = False
-                        if d_match:
-                            if current_tx:
-                                c_text = " ".join(current_tx["lines"])
-                                if len(strict_amount_pattern.findall(c_text)) > 0:
-                                    is_new = True
-
-                        if is_new or current_tx is None:
-                            if current_tx:
-                                grouped_txs.append(current_tx)
-                            current_tx = {
-                                "date": d_match.group(0) if d_match else last_valid_date,
-                                "lines": [line]
-                            }
-                        else:
-                            current_tx["lines"].append(line)
-
+                if is_new or current_tx is None:
                     if current_tx:
                         grouped_txs.append(current_tx)
+                    current_tx = {
+                        "date": d_match.group(0) if d_match else last_valid_date,
+                        "lines": [line]
+                    }
+                else:
+                    current_tx["lines"].append(line)
 
-                    for tx in grouped_txs:
-                        f_text = " ".join(tx["lines"])
-                        d_str = tx["date"]
-                        last_valid_date = d_str
+            if current_tx:
+                grouped_txs.append(current_tx)
 
-                        amt_strs = strict_amount_pattern.findall(f_text)
-                        amt_flts = [float(a.replace(',', '')) for a in amt_strs]
+            for tx in grouped_txs:
+                f_text = " ".join(tx["lines"])
+                d_str = tx["date"]
+                last_valid_date = d_str
 
-                        vch_type = "Receipt"
-                        tx_amt = 0.0
+                amt_strs = strict_amount_pattern.findall(f_text)
+                amt_flts = [float(a.replace(',', '')) for a in amt_strs]
 
-                        if len(amt_flts) >= 2:
-                            tx_amt = amt_flts[-2]
-                            curr_bal = amt_flts[-1]
-                            
-                            if running_balance is not None:
-                                diff = round(curr_bal - running_balance, 2)
-                                if diff < -0.01:
-                                    vch_type = "Payment"
-                                elif diff > 0.01:
-                                    vch_type = "Receipt"
-                                else:
-                                    vch_type = "Payment" if any(k in f_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
-                            else:
-                                vch_type = "Payment" if any(k in f_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
-                            
-                            running_balance = curr_bal
-                            closing_balance_detected = curr_bal
-                        elif len(amt_flts) == 1:
-                            tx_amt = amt_flts[0]
+                vch_type = "Receipt"
+                tx_amt = 0.0
+
+                if len(amt_flts) >= 2:
+                    tx_amt = amt_flts[-2]
+                    curr_bal = amt_flts[-1]
+                    
+                    if running_balance is not None:
+                        diff = round(curr_bal - running_balance, 2)
+                        if diff < -0.01:
+                            vch_type = "Payment"
+                        elif diff > 0.01:
+                            vch_type = "Receipt"
+                        else:
                             vch_type = "Payment" if any(k in f_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
+                    else:
+                        vch_type = "Payment" if any(k in f_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
+                    
+                    running_balance = curr_bal
+                    closing_balance_detected = curr_bal
+                elif len(amt_flts) == 1:
+                    tx_amt = amt_flts[0]
+                    vch_type = "Payment" if any(k in f_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
 
-                        clean_n = f_text
-                        for a_s in amt_strs:
-                            clean_n = clean_n.replace(a_s, '')
-                        clean_n = clean_n.replace(d_str, '')
+                clean_n = f_text
+                for a_s in amt_strs:
+                    clean_n = clean_n.replace(a_s, '')
+                clean_n = clean_n.replace(d_str, '')
 
-                        words = [w for w in clean_n.split() if not (w.isdigit() and len(w) <= 4)]
-                        final_n = " ".join(words) if words else "Bank Entry"
+                words = [w for w in clean_n.split() if not (w.isdigit() and len(w) <= 4)]
+                final_n = " ".join(words) if words else "Bank Entry"
 
-                        if tx_amt > 0:
-                            page_extracted_rows.append({
-                                "Date_Tally": parse_tally_date(d_str),
-                                "Date_Display": d_str,
-                                "Narration": final_n,
-                                "VoucherType": vch_type,
-                                "Amount": float(tx_amt)
-                            })
-
-            parsed_rows.extend(page_extracted_rows)
+                if tx_amt > 0:
+                    parsed_rows.append({
+                        "Date_Tally": parse_tally_date(d_str),
+                        "Date_Display": d_str,
+                        "Narration": final_n,
+                        "VoucherType": vch_type,
+                        "Amount": float(tx_amt)
+                    })
 
     return parsed_rows, opening_balance, closing_balance_detected
 
@@ -423,24 +311,89 @@ def generate_balanced_tally_xml(rows, bank_ledger):
 
 # Execution
 if uploaded_file is not None:
-    st.info("⌛ Extracting All Pages with Universal Engine...")
-    
-    if bank_option == "Auto-Detect Bank Format":
-        bank_name, bank_class, is_scanned, status = detect_bank_and_type(uploaded_file, password=pdf_password)
+    with st.spinner("⌛ Extracting All Pages with Fast Engine..."):
+        if bank_option == "Auto-Detect Bank Format":
+            bank_name, bank_class, is_scanned, status = detect_bank_and_type(uploaded_file, password=pdf_password)
+        else:
+            bank_name = bank_option
+            bank_class = "Class A"
+            is_scanned = False
+            status = "OK"
+        
+        if status == "ERROR_PASSWORD":
+            st.error("🔒 PDF is Password Protected! Please enter the correct password in the box above.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.success(f"🏦 Selected/Detected Bank: **{bank_name}**")
+            with c2:
+                st.info(f"🏷️ Engine Category: **{bank_class}**")
+            with c3:
+                if is_scanned:
+                    st.warning("🖼️ Format: Scanned PDF")
+                else:
+                    st.success("📄 Format: Digital Text PDF")
+
+            rows, op_bal, cl_bal = process_pdf_fast_multi_page(uploaded_file, password=pdf_password)
+        
+    if rows:
+        df_preview = pd.DataFrame(rows)
+        df_preview['Amount'] = pd.to_numeric(df_preview['Amount'], errors='coerce').fillna(0.0)
+        
+        st.markdown("---")
+        st.subheader("📊 Pre-Import Financial Audit Dashboard")
+        
+        receipts_df = df_preview[df_preview['VoucherType'] == 'Receipt']
+        payments_df = df_preview[df_preview['VoucherType'] == 'Payment']
+        
+        total_receipts = float(receipts_df['Amount'].sum()) if not receipts_df.empty else 0.0
+        total_payments = float(payments_df['Amount'].sum()) if not payments_df.empty else 0.0
+        total_count = len(df_preview)
+        
+        op_val = float(op_bal) if op_bal is not None else 0.0
+        calc_closing = op_val + total_receipts - total_payments
+        
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Opening Balance", f"₹ {op_val:,.2f}")
+        m2.metric("Total Extracted", f"{total_count} Vouchers")
+        m3.metric("Total Credit (+)", f"₹ {total_receipts:,.2f}")
+        m4.metric("Total Debit (-)", f"₹ {total_payments:,.2f}")
+        m5.metric("Calculated Closing", f"₹ {calc_closing:,.2f}")
+        
+        if cl_bal is not None:
+            if abs(calc_closing - float(cl_bal)) < 1.0:
+                st.success(f"✅ Closing Balance Perfectly Matched with Statement Closing Balance (₹ {float(cl_bal):,.2f})!")
+            else:
+                st.warning(f"ℹ️ Statement Closing Balance detected: ₹ {float(cl_bal):,.2f}")
+        
+        st.markdown("---")
+        st.subheader("📋 Extracted Vouchers Preview")
+        st.dataframe(df_preview[["Date_Display", "VoucherType", "Amount", "Narration"]], use_container_width=True)
+        
+        col1, col2 = st.columns(2)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_preview.to_excel(writer, index=False)
+        excel_data = output.getvalue()
+        
+        with col1:
+            st.download_button(
+                label="📥 Download Clean Excel File",
+                data=excel_data,
+                file_name="BuddyAI_Bank_Statement.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+            
+        xml_data = generate_balanced_tally_xml(rows, tally_bank_ledger)
+        
+        with col2:
+            st.download_button(
+                label="📄 Download Validated Tally XML",
+                data=xml_data,
+                file_name="BuddyAI_Tally_Import.xml",
+                mime="application/xml",
+                use_container_width=True
+            )
     else:
-        bank_name = bank_option
-        bank_class = "Class A"
-        is_scanned = False
-        status = "OK"
-    
-    if status == "ERROR_PASSWORD":
-        st.error("🔒 PDF is Password Protected! Please enter the correct password in the box above.")
-    else:
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.success(f"🏦 Selected/Detected Bank: **{bank_name}**")
-        with c2:
-            st.info(f"🏷️ Engine Category: **{bank_class}**")
-        with c3:
-            if is_scanned:
-                st.warning("🖼️ Format: Scanned PDF")
+        st.warning("⚠️ No valid transactions extracted. Verify statement content or password.")
