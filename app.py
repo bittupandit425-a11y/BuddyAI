@@ -25,7 +25,7 @@ if not st.session_state.authenticated:
 
 # Main App Page
 st.title("🤖 BuddyAI - Bank Statement to Tally XML & Excel Converter")
-st.write("Universal Mathematical Balance Engine: Accurate Payment & Receipt Classification with Exact Closing Balance Matching.")
+st.write("Smart Multi-Line & Mathematical Balance Engine for 100% Accurate Imports.")
 
 # Bank Selection Dropdown
 bank_option = st.selectbox(
@@ -86,14 +86,22 @@ def process_pdf_universal_math(pdf_file):
 
     for line in all_lines:
         date_match = date_pattern.search(line)
-        is_standalone_date = False
+        
+        is_new_tx = False
         
         if date_match:
-            match_start = date_match.start()
-            if match_start == 0 or line[match_start - 1] in [' ', '\t', '|', ':', '-']:
-                is_standalone_date = True
+            if current_tx is not None:
+                current_tx_full_text = " ".join(current_tx["lines"])
+                current_tx_amounts = strict_amount_pattern.findall(current_tx_full_text)
+                # If active transaction hasn't received amounts yet, keep appending lines!
+                if len(current_tx_amounts) == 0:
+                    is_new_tx = False
+                else:
+                    is_new_tx = True
+            else:
+                is_new_tx = True
 
-        if is_standalone_date:
+        if is_new_tx:
             if current_tx:
                 grouped_transactions.append(current_tx)
             current_tx = {
@@ -103,6 +111,12 @@ def process_pdf_universal_math(pdf_file):
         else:
             if current_tx:
                 current_tx["lines"].append(line)
+            else:
+                if date_match:
+                    current_tx = {
+                        "date": date_match.group(0),
+                        "lines": [line]
+                    }
 
     if current_tx:
         grouped_transactions.append(current_tx)
@@ -125,9 +139,6 @@ def process_pdf_universal_math(pdf_file):
             amt_cand = amt_floats[-2]   # EXACT TRANSACTION AMOUNT PRINTED IN PDF
             curr_bal = amt_floats[-1]   # EXACT RUNNING BALANCE PRINTED IN PDF
 
-            # MATHEMATICAL BALANCE RULE:
-            # If current balance is less than running balance -> PAYMENT
-            # If current balance is greater than running balance -> RECEIPT
             if running_balance is not None:
                 diff = round(curr_bal - running_balance, 2)
                 if diff < -0.01:
@@ -135,13 +146,11 @@ def process_pdf_universal_math(pdf_file):
                 elif diff > 0.01:
                     vch_type = "Receipt"
                 else:
-                    # Fallback keyword check if balance didn't change
                     if any(k in full_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT", "PAYMENT"]):
                         vch_type = "Payment"
                     else:
                         vch_type = "Receipt"
             else:
-                # First transaction fallback
                 if any(k in full_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT", "PAYMENT"]):
                     vch_type = "Payment"
                 else:
