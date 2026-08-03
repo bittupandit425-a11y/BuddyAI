@@ -430,4 +430,4 @@ if uploaded_file is not None:
         df_preview['Amount'] = pd.to_numeric(df_preview['Amount'], errors='coerce').fillna(0.0)
         
         st.markdown("---")
-        st.subheader("📊 P
+        st.subheader("📊 P")
