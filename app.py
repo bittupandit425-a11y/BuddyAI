@@ -4,11 +4,8 @@ import pandas as pd
 import re
 import io
 from datetime import datetime
-import pytesseract
-from pdf2image import convert_from_bytes
-from PIL import Image
 
-st.set_page_config(page_title="BuddyAI - Bank Converter with OCR", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="BuddyAI - Universal Bank Converter", page_icon="🤖", layout="wide")
 
 # Login Check
 if 'authenticated' not in st.session_state:
@@ -27,8 +24,8 @@ if not st.session_state.authenticated:
     st.stop()
 
 # Main App Page
-st.title("🤖 BuddyAI - Universal Bank Statement & OCR Converter")
-st.write("Supports both standard text PDFs and scanned/photo PDF statements with Tally XML export.")
+st.title("🤖 BuddyAI - Bank Statement to Tally XML & Excel Converter")
+st.write("Advanced Filtered Converter: Automatic Footer Removal & Strict Currency Extraction.")
 
 # Bank Selection Dropdown
 bank_option = st.selectbox(
@@ -37,10 +34,7 @@ bank_option = st.selectbox(
 )
 
 # Bank Ledger Name for Tally
-tally_bank_ledger = st.text_input("🏦 Tally Bank Ledger Name (Exact Tally Name):", value="Bank Account")
-
-# Checkbox for Force OCR Mode
-force_ocr = st.checkbox("🔍 Force OCR Mode (Enable this if PDF is a scanned photo/image)")
+tally_bank_ledger = st.text_input("🏦 Tally Bank Ledger Name (Exact Tally Name):", value="ICICI Bank-CC-4893")
 
 uploaded_file = st.file_uploader("📂 Upload PDF Bank Statement (Multi-page supported)", type=["pdf"])
 
@@ -50,6 +44,7 @@ def parse_tally_date(date_raw):
     formats = [
         "%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y",
         "%d %b %Y", "%d-%b-%Y", "%d %B %Y", "%d-%B-%Y",
+        "%d-%b-%y", "%d %b %y", "%d.%m.%Y", "%d.%m.%y",
         "%Y-%m-%d", "%Y/%m/%d"
     ]
     for fmt in formats:
@@ -60,61 +55,64 @@ def parse_tally_date(date_raw):
             pass
     return "20260401" # Fallback
 
-def extract_text_from_pdf(pdf_file, use_ocr=False):
+def process_pdf_smart_math(pdf_file):
+    # Blacklist keywords to ignore page footers, legends, and headers
+    ignore_keywords = [
+        "generated on", "page ", "page of", "legends used", "account statement",
+        "bharat bill payment", "banking cash transaction", "bill payment",
+        "statement of account", "balance carried forward", "b/f", "c/f",
+        "opening balance", "closing balance"
+    ]
+
+    # Strict regex pattern for standalone transaction dates
+    date_pattern = re.compile(
+        r'\b(0?[1-9]|[12][0-9]|3[01])[\/\-\.](0?[1-9]|1[0-2]|[A-Za-z]{3})[\/\-\.](20\d{2}|\d{2})\b'
+    )
+    # Strict regex pattern for actual currency amounts (prevents dates like 30.07.2026 from being parsed as 30.07)
+    strict_amount_pattern = re.compile(r'\b\d+(?:,\d+)*\.\d{2}(?!\.\d)\b')
+
     all_lines = []
-    
-    if not use_ocr:
-        # Standard Fast PDF Text Extraction
-        with pdfplumber.open(pdf_file) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text(layout=False)
-                if text and len(text.strip()) > 20:
-                    all_lines.extend(text.split('\n'))
-                    
-    # If standard text extraction yielded empty results or Force OCR is enabled
-    if use_ocr or not all_lines:
-        st.info("🧠 Running OCR Engine to read scanned photo PDF...")
-        pdf_bytes = pdf_file.getvalue()
-        images = convert_from_bytes(pdf_bytes)
-        
-        for img in images:
-            ocr_text = pytesseract.image_to_string(img)
-            if ocr_text:
-                all_lines.extend(ocr_text.split('\n'))
-                
-    return all_lines
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text(layout=False)
+            if text:
+                for line in text.split('\n'):
+                    line_strip = line.strip()
+                    if not line_strip:
+                        continue
+                    # Ignore footer/legend garbage lines
+                    if any(kw in line_strip.lower() for kw in ignore_keywords):
+                        continue
+                    all_lines.append(line_strip)
 
-def process_pdf_smart_math(pdf_file, use_ocr=False):
-    parsed_rows = []
-    
-    date_pattern = re.compile(r'(\d{1,2}[\/\-\s](?:\d{1,2}|[A-Za-z]{3})[\/\-\s]\d{2,4})')
-    indian_amount_pattern = re.compile(r'\b\d+(?:,\d+)*\.\d{2}\b')
-
-    all_lines = extract_text_from_pdf(pdf_file, use_ocr)
-
+    # Group lines into distinct transactions
     grouped_transactions = []
     current_tx = None
 
     for line in all_lines:
-        line_str = line.strip()
-        if not line_str:
-            continue
-
-        date_match = date_pattern.search(line_str)
+        date_match = date_pattern.search(line)
+        is_standalone_date = False
+        
         if date_match:
+            match_start = date_match.start()
+            if match_start == 0 or line[match_start - 1] in [' ', '\t', '|', ':', '-']:
+                is_standalone_date = True
+
+        if is_standalone_date:
             if current_tx:
                 grouped_transactions.append(current_tx)
             current_tx = {
-                "date": date_match.group(1),
-                "lines": [line_str]
+                "date": date_match.group(0),
+                "lines": [line]
             }
         else:
             if current_tx:
-                current_tx["lines"].append(line_str)
+                current_tx["lines"].append(line)
 
     if current_tx:
         grouped_transactions.append(current_tx)
 
+    parsed_rows = []
     running_balance = None
 
     for tx in grouped_transactions:
@@ -122,15 +120,16 @@ def process_pdf_smart_math(pdf_file, use_ocr=False):
         date_str = tx["date"]
         tally_date = parse_tally_date(date_str)
 
-        amt_strings = indian_amount_pattern.findall(full_text)
+        # Strict currency extraction
+        amt_strings = strict_amount_pattern.findall(full_text)
         amt_floats = [float(a.replace(',', '')) for a in amt_strings]
 
         vch_type = "Receipt"
         tx_amount = 0.0
 
         if len(amt_floats) >= 2:
-            amt_cand = amt_floats[-2]
-            curr_bal = amt_floats[-1]
+            amt_cand = amt_floats[-2]   # Candidate Transaction Amount
+            curr_bal = amt_floats[-1]   # Current Running Balance
 
             if running_balance is not None:
                 diff = round(curr_bal - running_balance, 2)
@@ -155,10 +154,15 @@ def process_pdf_smart_math(pdf_file, use_ocr=False):
             if "DR" in full_text.upper() or "WITHDRAWAL" in full_text.upper() or "DEBIT" in full_text.upper():
                 vch_type = "Payment"
 
-        clean_narr = date_pattern.sub('', full_text)
+        # Clean Narration
+        clean_narr = full_text
         for a_str in amt_strings:
             clean_narr = clean_narr.replace(a_str, '')
+        
+        # Remove only the main transaction date
+        clean_narr = clean_narr.replace(date_str, '')
 
+        # Remove standalone pure S.No integers
         words = [w for w in clean_narr.split() if not (w.isdigit() and len(w) <= 4)]
         final_narration = " ".join(words) if words else "Bank Entry"
 
@@ -236,13 +240,13 @@ def generate_balanced_tally_xml(rows, bank_ledger):
     return "\n".join(xml_lines)
 
 if uploaded_file is not None:
-    st.info("⌛ Processing bank statement with Auto OCR support...")
+    st.info("⌛ Extracting transactions with Advanced Filter Engine...")
     
-    rows = process_pdf_smart_math(uploaded_file, use_ocr=force_ocr)
+    rows = process_pdf_smart_math(uploaded_file)
     
     if rows:
         df_preview = pd.DataFrame(rows)
-        st.success(f"✅ Successfully extracted {len(rows)} transactions!")
+        st.success(f"✅ Successfully extracted {len(rows)} clean transactions!")
         
         st.subheader("📊 Extracted Data Preview")
         st.dataframe(df_preview[["Date_Display", "VoucherType", "Amount", "Narration"]])
@@ -274,4 +278,4 @@ if uploaded_file is not None:
                 use_container_width=True
             )
     else:
-        st.warning("⚠️ No valid transactions found. Try checking the 'Force OCR Mode' box above for scanned photo PDFs.")
+        st.warning("⚠️ No valid transactions found. Make sure this is a valid text PDF statement.")
