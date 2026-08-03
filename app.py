@@ -4,8 +4,11 @@ import pandas as pd
 import re
 import io
 from datetime import datetime
+import pytesseract
+from pdf2image import convert_from_bytes
+from PIL import Image
 
-st.set_page_config(page_title="BuddyAI - ICICI & Multi-Bank Converter", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="BuddyAI - Bank Converter with OCR", page_icon="🤖", layout="wide")
 
 # Login Check
 if 'authenticated' not in st.session_state:
@@ -24,8 +27,8 @@ if not st.session_state.authenticated:
     st.stop()
 
 # Main App Page
-st.title("🤖 BuddyAI - Bank Statement to Tally XML & Excel Converter")
-st.write("Advanced Mathematical Balance Engine for 100% Accurate Payment/Receipt Classification.")
+st.title("🤖 BuddyAI - Universal Bank Statement & OCR Converter")
+st.write("Supports both standard text PDFs and scanned/photo PDF statements with Tally XML export.")
 
 # Bank Selection Dropdown
 bank_option = st.selectbox(
@@ -34,7 +37,10 @@ bank_option = st.selectbox(
 )
 
 # Bank Ledger Name for Tally
-tally_bank_ledger = st.text_input("🏦 Tally Bank Ledger Name (Exact Tally Name):", value="ICICI Bank-CC-4893")
+tally_bank_ledger = st.text_input("🏦 Tally Bank Ledger Name (Exact Tally Name):", value="Bank Account")
+
+# Checkbox for Force OCR Mode
+force_ocr = st.checkbox("🔍 Force OCR Mode (Enable this if PDF is a scanned photo/image)")
 
 uploaded_file = st.file_uploader("📂 Upload PDF Bank Statement (Multi-page supported)", type=["pdf"])
 
@@ -54,25 +60,38 @@ def parse_tally_date(date_raw):
             pass
     return "20260401" # Fallback
 
-def process_pdf_smart_math(pdf_file):
+def extract_text_from_pdf(pdf_file, use_ocr=False):
+    all_lines = []
+    
+    if not use_ocr:
+        # Standard Fast PDF Text Extraction
+        with pdfplumber.open(pdf_file) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text(layout=False)
+                if text and len(text.strip()) > 20:
+                    all_lines.extend(text.split('\n'))
+                    
+    # If standard text extraction yielded empty results or Force OCR is enabled
+    if use_ocr or not all_lines:
+        st.info("🧠 Running OCR Engine to read scanned photo PDF...")
+        pdf_bytes = pdf_file.getvalue()
+        images = convert_from_bytes(pdf_bytes)
+        
+        for img in images:
+            ocr_text = pytesseract.image_to_string(img)
+            if ocr_text:
+                all_lines.extend(ocr_text.split('\n'))
+                
+    return all_lines
+
+def process_pdf_smart_math(pdf_file, use_ocr=False):
     parsed_rows = []
     
-    # Regex for Date Matching
     date_pattern = re.compile(r'(\d{1,2}[\/\-\s](?:\d{1,2}|[A-Za-z]{3})[\/\-\s]\d{2,4})')
-    # Regex for Indian & Western Decimal Currency Amounts (e.g. 63,21,660.64 or 51,330.00)
     indian_amount_pattern = re.compile(r'\b\d+(?:,\d+)*\.\d{2}\b')
 
-    running_balance = None
-    pending_tx = None
+    all_lines = extract_text_from_pdf(pdf_file, use_ocr)
 
-    with pdfplumber.open(pdf_file) as pdf:
-        all_lines = []
-        for page in pdf.pages:
-            text = page.extract_text(layout=False)
-            if text:
-                all_lines.extend(text.split('\n'))
-
-    # Group lines by transaction date
     grouped_transactions = []
     current_tx = None
 
@@ -96,13 +115,13 @@ def process_pdf_smart_math(pdf_file):
     if current_tx:
         grouped_transactions.append(current_tx)
 
-    # Process grouped transaction lines using Mathematical Balance Engine
+    running_balance = None
+
     for tx in grouped_transactions:
         full_text = " ".join(tx["lines"])
         date_str = tx["date"]
         tally_date = parse_tally_date(date_str)
 
-        # Find all valid decimal currency amounts in the transaction text
         amt_strings = indian_amount_pattern.findall(full_text)
         amt_floats = [float(a.replace(',', '')) for a in amt_strings]
 
@@ -110,8 +129,8 @@ def process_pdf_smart_math(pdf_file):
         tx_amount = 0.0
 
         if len(amt_floats) >= 2:
-            amt_cand = amt_floats[-2]   # Candidate Transaction Amount
-            curr_bal = amt_floats[-1]   # Current Running Balance
+            amt_cand = amt_floats[-2]
+            curr_bal = amt_floats[-1]
 
             if running_balance is not None:
                 diff = round(curr_bal - running_balance, 2)
@@ -136,12 +155,10 @@ def process_pdf_smart_math(pdf_file):
             if "DR" in full_text.upper() or "WITHDRAWAL" in full_text.upper() or "DEBIT" in full_text.upper():
                 vch_type = "Payment"
 
-        # Clean Narration Text
         clean_narr = date_pattern.sub('', full_text)
         for a_str in amt_strings:
             clean_narr = clean_narr.replace(a_str, '')
 
-        # Filter out standalone integers (like S.No 144, 145, or Days 21, 22)
         words = [w for w in clean_narr.split() if not (w.isdigit() and len(w) <= 4)]
         final_narration = " ".join(words) if words else "Bank Entry"
 
@@ -219,9 +236,9 @@ def generate_balanced_tally_xml(rows, bank_ledger):
     return "\n".join(xml_lines)
 
 if uploaded_file is not None:
-    st.info("⌛ Extracting transactions with Mathematical Balance Engine...")
+    st.info("⌛ Processing bank statement with Auto OCR support...")
     
-    rows = process_pdf_smart_math(uploaded_file)
+    rows = process_pdf_smart_math(uploaded_file, use_ocr=force_ocr)
     
     if rows:
         df_preview = pd.DataFrame(rows)
@@ -257,4 +274,4 @@ if uploaded_file is not None:
                 use_container_width=True
             )
     else:
-        st.warning("⚠️ No valid transactions found. Make sure this is a text-based PDF statement.")
+        st.warning("⚠️ No valid transactions found. Try checking the 'Force OCR Mode' box above for scanned photo PDFs.")
