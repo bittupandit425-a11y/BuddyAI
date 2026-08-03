@@ -5,7 +5,7 @@ import re
 import io
 from datetime import datetime
 
-st.set_page_config(page_title="BuddyAI - Precision Bank Converter", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="BuddyAI - Universal Bank Converter", page_icon="🤖", layout="wide")
 
 # Login Check
 if 'authenticated' not in st.session_state:
@@ -158,7 +158,7 @@ def process_pdf_precision_multipage(pdf_file, password=None):
         for page_idx, page in enumerate(pdf.pages):
             page_extracted_rows = []
             
-            # --- STRATEGY 1: TABLE CELL EXTRACTION ---
+            # METHOD 1: TABLE EXTRACTION
             tables = page.extract_tables()
             if tables:
                 for table in tables:
@@ -175,7 +175,7 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                         if any(kw in row_str for kw in ignore_keywords):
                             continue
 
-                        # Identify Table Header Row
+                        # Header Row Detection
                         if any(k in row_str for k in ["withdrawal", "deposit", "debit", "credit", "balance"]):
                             for idx, c in enumerate(row_cells):
                                 c_low = c.lower()
@@ -188,7 +188,6 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                             header_found_global = True
                             continue
 
-                        # Skip customer address / top info on page 1 before header
                         if not header_found_global and page_idx == 0:
                             continue
 
@@ -270,7 +269,7 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                             "Amount": float(tx_amount)
                         })
 
-            # --- STRATEGY 2: FALLBACK TEXT EXTRACTION ---
+            # METHOD 2: FALLBACK TEXT EXTRACTION
             if not page_extracted_rows:
                 text = page.extract_text(layout=False)
                 if text:
@@ -428,4 +427,7 @@ if uploaded_file is not None:
         
     if rows:
         df_preview = pd.DataFrame(rows)
-        df_preview['Amount'] = pd.to_numeric(
+        df_preview['Amount'] = pd.to_numeric(df_preview['Amount'], errors='coerce').fillna(0.0)
+        
+        st.markdown("---")
+        st.subheader("📊 P
