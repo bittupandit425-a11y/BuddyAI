@@ -25,7 +25,7 @@ if not st.session_state.authenticated:
 
 # Main App Page
 st.title("🤖 BuddyAI - Bank Statement to Tally XML & Excel Converter")
-st.write("Advanced Filtered Converter: Automatic Footer Removal & Strict Currency Extraction.")
+st.write("Bulletproof Amount & Voucher Classification Engine.")
 
 # Bank Selection Dropdown
 bank_option = st.selectbox(
@@ -128,30 +128,36 @@ def process_pdf_smart_math(pdf_file):
         tx_amount = 0.0
 
         if len(amt_floats) >= 2:
-            amt_cand = amt_floats[-2]   # Candidate Transaction Amount
-            curr_bal = amt_floats[-1]   # Current Running Balance
+            amt_cand = amt_floats[-2]   # EXACT TRANSACTION AMOUNT FROM PDF
+            curr_bal = amt_floats[-1]   # EXACT RUNNING BALANCE FROM PDF
 
             if running_balance is not None:
                 diff = round(curr_bal - running_balance, 2)
-                if abs(diff) > 0:
+                # Check if diff matches amt_cand
+                if abs(abs(diff) - amt_cand) < 1.0:
                     if diff < 0:
                         vch_type = "Payment"
-                        tx_amount = abs(diff)
                     else:
                         vch_type = "Receipt"
-                        tx_amount = diff
                 else:
-                    tx_amount = amt_cand
+                    # Running balance was desynced, use keyword/trend fallback for voucher type
+                    if curr_bal < running_balance:
+                        vch_type = "Payment"
+                    elif any(k in full_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]):
+                        vch_type = "Payment"
+                    else:
+                        vch_type = "Receipt"
             else:
-                tx_amount = amt_cand
-                if "DR" in full_text.upper() or "WITHDRAWAL" in full_text.upper() or "DEBIT" in full_text.upper():
+                if any(k in full_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]):
                     vch_type = "Payment"
 
+            # CRITICAL FIX: ALWAYS USE THE EXACT PRINTED AMOUNT (amt_cand)!
+            tx_amount = amt_cand
             running_balance = curr_bal
 
         elif len(amt_floats) == 1:
             tx_amount = amt_floats[0]
-            if "DR" in full_text.upper() or "WITHDRAWAL" in full_text.upper() or "DEBIT" in full_text.upper():
+            if any(k in full_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]):
                 vch_type = "Payment"
 
         # Clean Narration
@@ -240,7 +246,7 @@ def generate_balanced_tally_xml(rows, bank_ledger):
     return "\n".join(xml_lines)
 
 if uploaded_file is not None:
-    st.info("⌛ Extracting transactions with Advanced Filter Engine...")
+    st.info("⌛ Extracting transactions with Bulletproof Math Engine...")
     
     rows = process_pdf_smart_math(uploaded_file)
     
