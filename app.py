@@ -442,4 +442,5 @@ if uploaded_file is not None:
         with c2:
             st.info(f"🏷️ Engine Category: **{bank_class}**")
         with c3:
-            st.info("🖼️ Scanned OCR Check Completed" if is_scanned else "📄 Format: Digi
+            if is_scanned:
+                st.warning("🖼️ Format: Scanned PDF")
