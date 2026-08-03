@@ -27,7 +27,7 @@ if not st.session_state.authenticated:
 st.title("🤖 BuddyAI - Universal Bank Statement Converter")
 st.write("Production Engine: Complete Multi-Page Extraction, Manual Bank Overrides & Full Financial Audit.")
 
-# Bank Selection Dropdown (Manual + Auto-Detect)
+# Bank Selection Dropdown
 bank_option = st.selectbox(
     "🏦 Select Bank Format / Engine:",
     [
@@ -81,14 +81,12 @@ BANK_SIGNATURE_MAP = {
 def detect_bank_and_type(pdf_file, password=None):
     extracted_text = ""
     is_scanned = False
-    
     try:
         with pdfplumber.open(pdf_file, password=password if password else None) as pdf:
             for page in pdf.pages[:3]:
                 t = page.extract_text()
                 if t:
                     extracted_text += " " + t.upper()
-                    
             if len(extracted_text.strip()) < 50:
                 is_scanned = True
     except Exception as e:
@@ -444,4 +442,4 @@ if uploaded_file is not None:
         with c2:
             st.info(f"🏷️ Engine Category: **{bank_class}**")
         with c3:
-            if is_scanned:
+            st.info("🖼️ Scanned OCR Check Completed" if is_scanned else "📄 Format: Digi
