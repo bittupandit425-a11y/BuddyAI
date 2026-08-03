@@ -5,7 +5,7 @@ import re
 import io
 from datetime import datetime
 
-st.set_page_config(page_title="BuddyAI - Master Bank Statement Engine", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="BuddyAI - Universal Bank Converter", page_icon="🤖", layout="wide")
 
 # Login Check
 if 'authenticated' not in st.session_state:
@@ -157,7 +157,7 @@ def process_pdf_multi_page_foolproof(pdf_file, password=None):
         for page_idx, page in enumerate(pdf.pages):
             page_extracted_rows = []
             
-            # --- METHOD 1: STRUCTURED TABLE EXTRACTION ---
+            # METHOD 1: STRUCTURED TABLE EXTRACTION
             tables = page.extract_tables()
             if tables:
                 for table in tables:
@@ -264,7 +264,7 @@ def process_pdf_multi_page_foolproof(pdf_file, password=None):
                                 "Amount": float(tx_amount)
                             })
 
-            # --- METHOD 2: FALLBACK TEXT EXTRACTION ---
+            # METHOD 2: FALLBACK TEXT EXTRACTION
             if not page_extracted_rows:
                 text = page.extract_text(layout=False)
                 if text:
@@ -444,4 +444,4 @@ if uploaded_file is not None:
         with c2:
             st.info(f"🏷️ Engine Category: **{bank_class}**")
         with c3:
-            if is_sc
+            if is_scanned:
