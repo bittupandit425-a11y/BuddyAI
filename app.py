@@ -5,7 +5,7 @@ import re
 import io
 from datetime import datetime
 
-st.set_page_config(page_title="BuddyAI - Bank Statement Converter", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="BuddyAI - Multi-page Bank Converter", page_icon="🤖", layout="wide")
 
 # Login Check
 if 'authenticated' not in st.session_state:
@@ -24,8 +24,8 @@ if not st.session_state.authenticated:
     st.stop()
 
 # Main App Page
-st.title("🤖 BuddyAI - Bank Statement to Tally XML & Excel Converter")
-st.write("Accurate Debit/Credit column detection with valid Tally XML output.")
+st.title("🤖 BuddyAI - Multi-Page Bank Statement Converter for Tally")
+st.write("Extract multi-page bank statements accurately even if table headers are only on Page 1.")
 
 # Bank Selection Dropdown
 bank_option = st.selectbox(
@@ -71,28 +71,29 @@ def process_pdf(pdf_file):
     parsed_rows = []
     date_regex = re.compile(r'(\d{1,2}[\/\-\s](?:\d{1,2}|[A-Za-z]{3})[\/\-\s]\d{2,4})')
 
+    # Global column memory across all pages
+    debit_col = -1
+    credit_col = -1
+
     with pdfplumber.open(pdf_file) as pdf:
         for page in pdf.pages:
             tables = page.extract_tables()
             
             if tables:
                 for table in tables:
-                    if not table or len(table) < 2:
+                    if not table or len(table) < 1:
                         continue
                     
-                    # Step 1: Detect Column Indices from Table Header
-                    debit_col = -1
-                    credit_col = -1
-                    
-                    for row_idx, row in enumerate(table[:3]): # Check top 3 rows for headers
+                    # 1. Look for Header Row to save column indices permanently
+                    for row in table[:3]:
                         row_str_cols = [str(c).lower().strip() if c else "" for c in row]
                         for c_idx, col_name in enumerate(row_str_cols):
-                            if any(k in col_name for k in ['debit', 'withdrawal', 'dr', 'outflow', 'dr.']):
+                            if any(k in col_name for k in ['debit', 'withdrawal', 'dr', 'outflow', 'dr.', 'withdrawal(rs.)', 'withdrawal (rs)']):
                                 debit_col = c_idx
-                            elif any(k in col_name for k in ['credit', 'deposit', 'cr', 'inflow', 'cr.']):
+                            elif any(k in col_name for k in ['credit', 'deposit', 'cr', 'inflow', 'cr.', 'deposit(rs.)', 'deposit (rs)']):
                                 credit_col = c_idx
-                    
-                    # Step 2: Extract Row Data based on Detected Columns
+
+                    # 2. Extract transactions using global debit/credit column memory
                     for row in table:
                         if not row or len(row) < 3:
                             continue
@@ -105,13 +106,20 @@ def process_pdf(pdf_file):
                             date_str = date_match.group(1)
                             tally_date = parse_tally_date(date_str)
                             
-                            narration_parts = [c for c in row_cells if c and not date_regex.search(c) and not re.match(r'^\d+$', c)]
+                            # Clean narration (excluding date and pure serial numbers)
+                            narration_parts = []
+                            for idx, cell in enumerate(row_cells):
+                                if cell and not date_regex.search(cell):
+                                    if idx != debit_col and idx != credit_col:
+                                        if not re.match(r'^\d+$', cell) or len(cell) > 5:
+                                            narration_parts.append(cell)
+                            
                             full_narration = " ".join(narration_parts) if narration_parts else "Bank Transaction"
                             
                             vch_type = "Receipt"
                             tx_amount = 0.0
                             
-                            # If Debit/Credit columns were detected by header position
+                            # Using remembered column positions from Page 1
                             if debit_col != -1 and debit_col < len(row_cells):
                                 dr_val = clean_amount(row_cells[debit_col])
                                 if dr_val > 0:
@@ -124,7 +132,7 @@ def process_pdf(pdf_file):
                                     vch_type = "Receipt"
                                     tx_amount = cr_val
                                     
-                            # Fallback if header detection didn't match
+                            # Fallback if header index wasn't matched
                             if tx_amount == 0.0:
                                 numbers = [clean_amount(c) for c in row_cells if clean_amount(c) > 0 and ('.' in c or len(c) > 3)]
                                 if numbers:
@@ -210,16 +218,16 @@ def generate_balanced_tally_xml(rows, bank_ledger):
     return "\n".join(xml_lines)
 
 if uploaded_file is not None:
-    st.info("⌛ Processing bank statement with column detection...")
+    st.info("⌛ Extracting all pages with Multi-Page Persistent Memory...")
     
     rows = process_pdf(uploaded_file)
     
     if rows:
         df_preview = pd.DataFrame(rows)
-        st.success(f"✅ Extracted {len(rows)} transactions!")
+        st.success(f"✅ Successfully extracted {len(rows)} transactions across all pages!")
         
         st.subheader("📊 Extracted Data Preview")
-        st.dataframe(df_preview[["Date_Display", "VoucherType", "Amount", "Narration"]].head(25))
+        st.dataframe(df_preview[["Date_Display", "VoucherType", "Amount", "Narration"]])
         
         col1, col2 = st.columns(2)
         
