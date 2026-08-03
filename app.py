@@ -139,7 +139,7 @@ def process_pdf_multi_page_foolproof(pdf_file, password=None):
         for page_idx, page in enumerate(pdf.pages):
             page_extracted_rows = []
             
-            # --- METHOD 1: STRUCTURED TABLE EXTRACTION ---
+            # METHOD 1: STRUCTURED TABLE EXTRACTION
             tables = page.extract_tables()
             if tables:
                 for table in tables:
@@ -148,7 +148,6 @@ def process_pdf_multi_page_foolproof(pdf_file, password=None):
                     
                     dr_col, cr_col, bal_col = -1, -1, -1
 
-                    # Identify column headers if present
                     for row in table[:3]:
                         row_str = [str(c).lower().strip() if c else "" for c in row]
                         for idx, cell in enumerate(row_str):
@@ -171,7 +170,6 @@ def process_pdf_multi_page_foolproof(pdf_file, password=None):
                         if re.search(r'^page\s+\d+(\s+of\s+\d+)?$', row_text.lower().strip()):
                             continue
 
-                        # Extract opening balance
                         if "opening balance" in row_text.lower() or "b/f" in row_text.lower():
                             amts = strict_amount_pattern.findall(row_text)
                             if amts and opening_balance is None:
@@ -203,7 +201,6 @@ def process_pdf_multi_page_foolproof(pdf_file, password=None):
                         vch_type = "Receipt"
                         tx_amount = 0.0
 
-                        # Column Index Matching
                         if dr_col != -1 and dr_col < len(row_cells) and clean_amount(row_cells[dr_col]) > 0:
                             tx_amount = clean_amount(row_cells[dr_col])
                             vch_type = "Payment"
@@ -246,7 +243,7 @@ def process_pdf_multi_page_foolproof(pdf_file, password=None):
                                 "Amount": tx_amount
                             })
 
-            # --- METHOD 2: FALLBACK TEXT EXTRACTION IF TABLE WAS EMPTY OR MISSED ROWS ---
+            # METHOD 2: FALLBACK TEXT EXTRACTION
             if not page_extracted_rows:
                 text = page.extract_text(layout=False)
                 if text:
@@ -411,7 +408,6 @@ if uploaded_file is not None:
     if status == "ERROR_PASSWORD":
         st.error("🔒 PDF is Password Protected! Please enter the correct password in the box above.")
     else:
-        # Display Badges
         c1, c2, c3 = st.columns(3)
         with c1:
             st.success(f"🏦 Bank Name: **{bank_name}**")
@@ -428,10 +424,14 @@ if uploaded_file is not None:
         if rows:
             df_preview = pd.DataFrame(rows)
             
-            # AUDIT SUMMARY DASHBOARD
             st.markdown("---")
             st.subheader("📊 Pre-Import Mathematical Audit Dashboard")
             
             total_receipts = df_preview[df_preview['VoucherType'] == 'Receipt']['Amount'].sum()
             total_payments = df_preview[df_preview['VoucherType'] == 'Payment']['Amount'].sum()
-            total_count = len(d
+            total_count = len(df_preview)
+            
+            calc_closing = (op_bal if op_bal is not None else 0.0) + total_receipts - total_payments
+            
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Total Extracted Vouchers", f"{total_count} Vouchers")
