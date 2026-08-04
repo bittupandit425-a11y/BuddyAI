@@ -25,7 +25,7 @@ if not st.session_state.authenticated:
 
 # App Header
 st.title("🤖 BuddyAI - Universal Bank Statement Converter")
-st.write("Precision Engine: Multi-Page Table & Text Aggregator with Clean Cell Processing.")
+st.write("Precision Engine: Universal Text & Table Block Aggregator with Full Deposit/Receipt Detection.")
 
 # Bank Selection Dropdown
 bank_option = st.selectbox(
@@ -137,7 +137,7 @@ def process_pdf_precision_multipage(pdf_file, password=None):
     date_pattern = re.compile(
         r'\b(0?[1-9]|[12][0-9]|3[01])[\/\-\.\s](0?[1-9]|1[0-2]|[A-Za-z]{3}|\d{1,2})[\/\-\.\s](20\d{2}|\d{2})\b'
     )
-    strict_amount_pattern = re.compile(r'\b\d+(?:,\d+)*\.\d{2}(?!\.\d)\b')
+    strict_amount_pattern = re.compile(r'\b\d{1,3}(?:,\d{2,3})*\.\d{2}\b')
 
     ignore_keywords = [
         "generated on", "legends used", "account statement",
@@ -146,7 +146,6 @@ def process_pdf_precision_multipage(pdf_file, password=None):
     ]
 
     parsed_rows = []
-    last_valid_date = None
     running_balance = None
     opening_balance = None
     closing_balance_detected = None
@@ -158,7 +157,7 @@ def process_pdf_precision_multipage(pdf_file, password=None):
         for page_idx, page in enumerate(pdf.pages):
             page_extracted_rows = []
             
-            # --- STRATEGY 1: TABLE EXTRACTION WITH CLEAN CELL INNER-JOIN ---
+            # --- STRATEGY 1: TABLE EXTRACTION (For Structured Border/Grid PDF) ---
             tables = page.extract_tables()
             if tables:
                 for table in tables:
@@ -169,14 +168,13 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                         if not raw_row:
                             continue
 
-                        # Clean each cell: Join multi-line text inside a single cell with spaces
                         row_cells = [" ".join([l.strip() for l in str(c).split('\n') if l.strip()]) if c is not None else "" for c in raw_row]
                         row_str = " ".join(row_cells).lower()
 
                         if any(kw in row_str for kw in ignore_keywords):
                             continue
 
-                        # Identify Table Header Row
+                        # Header Row Detection
                         if any(k in row_str for k in ["withdrawal", "deposit", "debit", "credit", "balance"]):
                             for idx, c in enumerate(row_cells):
                                 c_low = c.lower()
@@ -207,11 +205,9 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                         # Date
                         cell_date = row_cells[date_col] if (date_col != -1 and date_col < len(row_cells)) else ""
                         d_match = date_pattern.search(cell_date) or date_pattern.search(row_str)
-                        if d_match:
-                            last_valid_date = d_match.group(0)
-
-                        if not last_valid_date:
+                        if not d_match:
                             continue
+                        last_valid_date = d_match.group(0)
 
                         # Amounts
                         dr_amt = clean_amount(row_cells[dr_col]) if (dr_col != -1 and dr_col < len(row_cells)) else 0.0
@@ -221,38 +217,18 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                         vch_type = None
                         tx_amount = 0.0
 
-                        if dr_amt > 0:
-                            vch_type = "Payment"
-                            tx_amount = dr_amt
-                            if bal_amt > 0: running_balance = bal_amt; closing_balance_detected = bal_amt
-                        elif cr_amt > 0:
+                        if cr_amt > 0:
                             vch_type = "Receipt"
                             tx_amount = cr_amt
                             if bal_amt > 0: running_balance = bal_amt; closing_balance_detected = bal_amt
-                        else:
-                            num_cells = []
-                            for cell in row_cells:
-                                a = clean_amount(cell)
-                                if a > 0 and ('.' in cell or len(cell) > 3):
-                                    num_cells.append(a)
-                            if len(num_cells) >= 2:
-                                tx_amount = num_cells[-2]
-                                curr_bal = num_cells[-1]
-                                if running_balance is not None:
-                                    diff = round(curr_bal - running_balance, 2)
-                                    vch_type = "Payment" if diff < -0.01 else ("Receipt" if diff > 0.01 else ("Payment" if "DR" in row_str.upper() else "Receipt"))
-                                else:
-                                    vch_type = "Payment" if "DR" in row_str.upper() else "Receipt"
-                                running_balance = curr_bal
-                                closing_balance_detected = curr_bal
-                            elif len(num_cells) == 1:
-                                tx_amount = num_cells[0]
-                                vch_type = "Payment" if any(k in row_str.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
+                        elif dr_amt > 0:
+                            vch_type = "Payment"
+                            tx_amount = dr_amt
+                            if bal_amt > 0: running_balance = bal_amt; closing_balance_detected = bal_amt
 
                         if tx_amount == 0.0:
                             continue
 
-                        # Description
                         desc = row_cells[desc_col] if (desc_col != -1 and desc_col < len(row_cells)) else ""
                         ref = row_cells[ref_col] if (ref_col != -1 and ref_col < len(row_cells)) else ""
                         
@@ -270,22 +246,21 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                             "Amount": float(tx_amount)
                         })
 
-            # --- STRATEGY 2: FALLBACK TEXT EXTRACTION ---
+            # --- STRATEGY 2: UNIVERSAL TEXT BLOCK EXTRACTION (For Gridless/Borderless PDFs like HDFC) ---
             if not page_extracted_rows:
                 text = page.extract_text(layout=False)
                 if text:
-                    lines = [l.strip() for l in text.split('\n') if l.strip() and not any(kw in l.lower() for kw in ignore_keywords)]
+                    lines = [l.strip() for l in text.split('\n') if l.strip()]
                     
-                    if page_idx == 0:
-                        start_idx = 0
-                        for idx, l in enumerate(lines):
-                            if any(k in l.lower() for k in ["date", "description", "opening balance", "withdrawal", "deposit"]):
-                                start_idx = idx
-                                break
-                        lines = lines[start_idx:]
+                    current_block = None
+                    tx_blocks = []
 
                     for line in lines:
-                        if "opening balance" in line.lower() or "b/f" in line.lower():
+                        line_low = line.lower()
+                        if any(kw in line_low for kw in ignore_keywords) and not ("opening balance" in line_low or "b/f" in line_low):
+                            continue
+
+                        if "opening balance" in line_low or "b/f" in line_low:
                             amts = strict_amount_pattern.findall(line)
                             if amts and opening_balance is None:
                                 try:
@@ -294,11 +269,35 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                                 except ValueError: pass
                             continue
 
-                        d_match = date_pattern.search(line)
-                        if d_match:
-                            last_valid_date = d_match.group(0)
+                        if "withdrawal" in line_low or "deposit" in line_low or "closing balance" in line_low:
+                            continue
 
-                        amt_strs = strict_amount_pattern.findall(line)
+                        d_match = date_pattern.search(line)
+                        is_new = False
+                        if d_match and d_match.start() < 15:
+                            amts_in_line = strict_amount_pattern.findall(line)
+                            if len(amts_in_line) > 0:
+                                is_new = True
+
+                        if is_new:
+                            if current_block:
+                                tx_blocks.append(current_block)
+                            current_block = {
+                                "date": d_match.group(0),
+                                "lines": [line]
+                            }
+                        else:
+                            if current_block:
+                                current_block["lines"].append(line)
+
+                    if current_block:
+                        tx_blocks.append(current_block)
+
+                    for block in tx_blocks:
+                        full_text = " ".join(block["lines"])
+                        d_str = block["date"]
+
+                        amt_strs = strict_amount_pattern.findall(full_text)
                         amt_flts = [float(a.replace(',', '')) for a in amt_strs]
 
                         if not amt_flts: continue
@@ -309,28 +308,35 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                         if len(amt_flts) >= 2:
                             tx_amt = amt_flts[-2]
                             curr_bal = amt_flts[-1]
+
                             if running_balance is not None:
                                 diff = round(curr_bal - running_balance, 2)
-                                vch_type = "Payment" if diff < -0.01 else ("Receipt" if diff > 0.01 else ("Payment" if "DR" in line.upper() else "Receipt"))
+                                if diff > 0.01:
+                                    vch_type = "Receipt"
+                                elif diff < -0.01:
+                                    vch_type = "Payment"
+                                else:
+                                    vch_type = "Payment" if any(k in full_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
                             else:
-                                vch_type = "Payment" if "DR" in line.upper() else "Receipt"
+                                vch_type = "Payment" if any(k in full_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
+
                             running_balance = curr_bal
                             closing_balance_detected = curr_bal
                         elif len(amt_flts) == 1:
                             tx_amt = amt_flts[0]
-                            vch_type = "Payment" if any(k in line.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
+                            vch_type = "Payment" if any(k in full_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
 
-                        clean_n = line
+                        clean_n = full_text
                         for a_s in amt_strs: clean_n = clean_n.replace(a_s, '')
-                        if d_match: clean_n = clean_n.replace(d_match.group(0), '')
+                        clean_n = clean_n.replace(d_str, '')
 
                         words = [w for w in clean_n.split() if not (w.isdigit() and len(w) <= 4)]
                         final_n = " ".join(words) if words else "Bank Entry"
 
-                        if tx_amt > 0 and last_valid_date:
+                        if tx_amt > 0:
                             page_extracted_rows.append({
-                                "Date_Tally": parse_tally_date(last_valid_date),
-                                "Date_Display": last_valid_date,
+                                "Date_Tally": parse_tally_date(d_str),
+                                "Date_Display": d_str,
                                 "Narration": final_n,
                                 "VoucherType": vch_type,
                                 "Amount": float(tx_amt)
