@@ -430,4 +430,59 @@ if uploaded_file is not None:
         df_preview['Amount'] = pd.to_numeric(df_preview['Amount'], errors='coerce').fillna(0.0)
         
         st.markdown("---")
-        st.subheader("📊 P")
+        st.subheader("📊 Pre-Import Financial Audit Dashboard")
+        
+        receipts_df = df_preview[df_preview['VoucherType'] == 'Receipt']
+        payments_df = df_preview[df_preview['VoucherType'] == 'Payment']
+        
+        total_receipts = float(receipts_df['Amount'].sum()) if not receipts_df.empty else 0.0
+        total_payments = float(payments_df['Amount'].sum()) if not payments_df.empty else 0.0
+        total_count = len(df_preview)
+        
+        op_val = float(op_bal) if op_bal is not None else 0.0
+        calc_closing = op_val + total_receipts - total_payments
+        
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Opening Balance", f"₹ {op_val:,.2f}")
+        m2.metric("Total Extracted", f"{total_count} Vouchers")
+        m3.metric("Total Credit (+)", f"₹ {total_receipts:,.2f}")
+        m4.metric("Total Debit (-)", f"₹ {total_payments:,.2f}")
+        m5.metric("Calculated Closing", f"₹ {calc_closing:,.2f}")
+        
+        if cl_bal is not None:
+            if abs(calc_closing - float(cl_bal)) < 1.0:
+                st.success(f"✅ Closing Balance Perfectly Matched with Statement Closing Balance (₹ {float(cl_bal):,.2f})!")
+            else:
+                st.warning(f"ℹ️ Statement Closing Balance detected: ₹ {float(cl_bal):,.2f}")
+        
+        st.markdown("---")
+        st.subheader("📋 Extracted Vouchers Preview")
+        st.dataframe(df_preview[["Date_Display", "VoucherType", "Amount", "Narration"]], use_container_width=True)
+        
+        col1, col2 = st.columns(2)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_preview.to_excel(writer, index=False)
+        excel_data = output.getvalue()
+        
+        with col1:
+            st.download_button(
+                label="📥 Download Clean Excel File",
+                data=excel_data,
+                file_name="BuddyAI_Bank_Statement.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+            
+        xml_data = generate_balanced_tally_xml(rows, tally_bank_ledger)
+        
+        with col2:
+            st.download_button(
+                label="📄 Download Validated Tally XML",
+                data=xml_data,
+                file_name="BuddyAI_Tally_Import.xml",
+                mime="application/xml",
+                use_container_width=True
+            )
+    else:
+        st.warning("⚠️ No valid transactions extracted.
