@@ -25,7 +25,7 @@ if not st.session_state.authenticated:
 
 # App Header
 st.title("🤖 BuddyAI - Universal Bank Statement Converter")
-st.write("Precision Engine: Multi-Page Table & Text Aggregator with Persistent Date Tracking.")
+st.write("Precision Engine: Multi-Page Table & Text Aggregator with Axis Bank Fallback Patch.")
 
 # Bank Selection Dropdown
 bank_option = st.selectbox(
@@ -124,7 +124,8 @@ def parse_tally_date(date_raw):
 def clean_amount(val_str):
     if not val_str:
         return 0.0
-    val_clean = str(val_str).replace(',', '').strip()
+    # Clean non-breaking spaces (\xa0) and commas
+    val_clean = str(val_str).replace('\xa0', ' ').replace(',', '').strip()
     match = re.search(r'\b\d+\.\d{2}\b', val_clean)
     if match:
         try:
@@ -142,7 +143,12 @@ def process_pdf_precision_multipage(pdf_file, password=None):
     ignore_keywords = [
         "generated on", "legends used", "account statement",
         "bharat bill payment", "banking cash transaction", "bill payment",
-        "statement of account", "balance carried forward", "page "
+        "statement of account", "page "
+    ]
+
+    balance_summary_keywords = [
+        "opening balance", "closing balance", "b/f", "c/f",
+        "balance brought forward", "balance carried forward", "total deposit", "total withdrawal"
     ]
 
     parsed_rows = []
@@ -158,7 +164,7 @@ def process_pdf_precision_multipage(pdf_file, password=None):
         for page_idx, page in enumerate(pdf.pages):
             page_extracted_rows = []
             
-            # --- STRATEGY 1: TABLE EXTRACTION (For Structured Border/Grid PDF) ---
+            # --- STRATEGY 1: TABLE EXTRACTION ---
             tables = page.extract_tables()
             if tables:
                 for table in tables:
@@ -176,7 +182,7 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                             continue
 
                         # Header Row Detection
-                        if any(k in row_str for k in ["withdrawal", "deposit", "debit", "credit", "balance"]):
+                        if any(k in row_str for k in ["withdrawal", "deposit", "debit", "credit", "balance"]) and not header_found_global:
                             for idx, c in enumerate(row_cells):
                                 c_low = c.lower()
                                 if "date" in c_low and date_col == -1: date_col = idx
@@ -191,19 +197,21 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                         if not header_found_global and page_idx == 0:
                             continue
 
-                        # Opening Balance
-                        if "opening balance" in row_str or "b/f" in row_str:
-                            if bal_col != -1 and bal_col < len(row_cells):
-                                opening_balance = clean_amount(row_cells[bal_col])
-                            if not opening_balance:
-                                amts = strict_amount_pattern.findall(row_str)
-                                if amts:
-                                    opening_balance = float(amts[-1].replace(',', ''))
-                            if opening_balance:
-                                running_balance = opening_balance
+                        # Filter Opening/Closing Balance rows
+                        if any(b_kw in row_str for b_kw in balance_summary_keywords):
+                            if "opening" in row_str or "b/f" in row_str:
+                                if bal_col != -1 and bal_col < len(row_cells):
+                                    opening_balance = clean_amount(row_cells[bal_col])
+                                if not opening_balance:
+                                    amts = strict_amount_pattern.findall(row_str)
+                                    if amts: opening_balance = float(amts[-1].replace(',', ''))
+                                if opening_balance: running_balance = opening_balance
+                            elif "closing" in row_str or "c/f" in row_str:
+                                if bal_col != -1 and bal_col < len(row_cells):
+                                    closing_balance_detected = clean_amount(row_cells[bal_col])
                             continue
 
-                        # Date Check: Update last_valid_date if date is present in this row
+                        # Date Handling
                         cell_date = row_cells[date_col] if (date_col != -1 and date_col < len(row_cells)) else ""
                         d_match = date_pattern.search(cell_date) or date_pattern.search(row_str)
                         if d_match:
@@ -212,7 +220,7 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                         if not last_valid_date:
                             continue
 
-                        # Amounts
+                        # Amount Extraction with Axis Bank Fallback
                         dr_amt = clean_amount(row_cells[dr_col]) if (dr_col != -1 and dr_col < len(row_cells)) else 0.0
                         cr_amt = clean_amount(row_cells[cr_col]) if (cr_col != -1 and cr_col < len(row_cells)) else 0.0
                         bal_amt = clean_amount(row_cells[bal_col]) if (bal_col != -1 and bal_col < len(row_cells)) else 0.0
@@ -228,6 +236,26 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                             vch_type = "Payment"
                             tx_amount = dr_amt
                             if bal_amt > 0: running_balance = bal_amt; closing_balance_detected = bal_amt
+                        else:
+                            # Axis Bank Row Scan Fallback (if column mapping missed on this row)
+                            num_cells = []
+                            for idx, cell in enumerate(row_cells):
+                                a = clean_amount(cell)
+                                if a > 0 and ('.' in str(cell) or len(str(cell).strip()) > 3):
+                                    num_cells.append((idx, a))
+                            if len(num_cells) >= 2:
+                                tx_amount = num_cells[-2][1]
+                                curr_bal = num_cells[-1][1]
+                                if running_balance is not None:
+                                    diff = round(curr_bal - running_balance, 2)
+                                    vch_type = "Payment" if diff < -0.01 else ("Receipt" if diff > 0.01 else ("Payment" if any(k in row_str.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"))
+                                else:
+                                    vch_type = "Payment" if any(k in row_str.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
+                                running_balance = curr_bal
+                                closing_balance_detected = curr_bal
+                            elif len(num_cells) == 1:
+                                tx_amount = num_cells[0][1]
+                                vch_type = "Payment" if any(k in row_str.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
 
                         if tx_amount == 0.0:
                             continue
@@ -249,7 +277,7 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                             "Amount": float(tx_amount)
                         })
 
-            # --- STRATEGY 2: UNIVERSAL TEXT BLOCK EXTRACTION (For Gridless/Borderless PDFs like HDFC) ---
+            # --- STRATEGY 2: UNIVERSAL TEXT BLOCK EXTRACTION ---
             if not page_extracted_rows:
                 text = page.extract_text(layout=False)
                 if text:
@@ -260,19 +288,15 @@ def process_pdf_precision_multipage(pdf_file, password=None):
 
                     for line in lines:
                         line_low = line.lower()
-                        if any(kw in line_low for kw in ignore_keywords) and not ("opening balance" in line_low or "b/f" in line_low):
+                        if any(kw in line_low for kw in ignore_keywords):
                             continue
 
-                        if "opening balance" in line_low or "b/f" in line_low:
-                            amts = strict_amount_pattern.findall(line)
-                            if amts and opening_balance is None:
-                                try:
+                        if any(b_kw in line_low for b_kw in balance_summary_keywords):
+                            if ("opening" in line_low or "b/f" in line_low) and opening_balance is None:
+                                amts = strict_amount_pattern.findall(line)
+                                if amts:
                                     opening_balance = float(amts[-1].replace(',', ''))
                                     running_balance = opening_balance
-                                except ValueError: pass
-                            continue
-
-                        if "withdrawal" in line_low or "deposit" in line_low or "closing balance" in line_low:
                             continue
 
                         d_match = date_pattern.search(line)
@@ -282,7 +306,6 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                         if d_match and d_match.start() < 20 and len(amt_strs) > 0:
                             is_new = True
                         elif len(amt_strs) >= 2 and current_block is not None:
-                            # Same-date consecutive entry where Date cell is blank
                             is_new = True
 
                         if is_new:
