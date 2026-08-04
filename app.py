@@ -485,4 +485,4 @@ if uploaded_file is not None:
                 use_container_width=True
             )
     else:
-        st.warning("⚠️ No valid transactions extracted.
+        st.warning("⚠️ No valid transactions extracted. Verify statement content or password.")
