@@ -158,10 +158,8 @@ def process_pdf_precision_multipage(pdf_file, password=None):
         for page_idx, page in enumerate(pdf.pages):
             page_extracted_rows = []
             
-            # --- STRATEGY 1: TABLE EXTRACTION WITH CELL INNER UN-MERGING ---
+            # --- STRATEGY 1: TABLE EXTRACTION WITH CLEAN CELL INNER-JOIN ---
             tables = page.extract_tables()
-            
-            # Check if pdfplumber returned a merged borderless table (1 huge row)
             if tables:
                 for table in tables:
                     if not table or len(table) < 1:
@@ -171,122 +169,106 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                         if not raw_row:
                             continue
 
-                        # Detect if row contains internal multi-line cells
-                        cell_lines = [str(c).split('\n') if c is not None else [""] for c in raw_row]
-                        max_lines = max(len(l) for l in cell_lines)
+                        # Clean each cell: Join multi-line text inside a single cell with spaces
+                        row_cells = [" ".join([l.strip() for l in str(c).split('\n') if l.strip()]) if c is not None else "" for c in raw_row]
+                        row_str = " ".join(row_cells).lower()
 
-                        # If multi-line row detected and NOT a header row, split into individual clean sub-rows
-                        sub_rows = []
-                        raw_str = " ".join([str(c) for c in raw_row if c]).lower()
+                        if any(kw in row_str for kw in ignore_keywords):
+                            continue
 
-                        if max_lines > 1 and not any(k in raw_str for k in ["withdrawal", "deposit", "debit", "credit"]):
-                            for l_idx in range(max_lines):
-                                sub_r = []
-                                for l_list in cell_lines:
-                                    sub_r.append(l_list[l_idx].strip() if l_idx < len(l_list) else "")
-                                sub_rows.append(sub_r)
+                        # Identify Table Header Row
+                        if any(k in row_str for k in ["withdrawal", "deposit", "debit", "credit", "balance"]):
+                            for idx, c in enumerate(row_cells):
+                                c_low = c.lower()
+                                if "date" in c_low and date_col == -1: date_col = idx
+                                elif ("narration" in c_low or "description" in c_low or "particulars" in c_low) and desc_col == -1: desc_col = idx
+                                elif ("ref" in c_low or "chq" in c_low or "cheque" in c_low) and ref_col == -1: ref_col = idx
+                                elif ("withdrawal" in c_low or "debit" in c_low or "dr" in c_low) and dr_col == -1: dr_col = idx
+                                elif ("deposit" in c_low or "credit" in c_low or "cr" in c_low) and cr_col == -1: cr_col = idx
+                                elif "balance" in c_low and bal_col == -1: bal_col = idx
+                            header_found_global = True
+                            continue
+
+                        if not header_found_global and page_idx == 0:
+                            continue
+
+                        # Opening Balance
+                        if "opening balance" in row_str or "b/f" in row_str:
+                            if bal_col != -1 and bal_col < len(row_cells):
+                                opening_balance = clean_amount(row_cells[bal_col])
+                            if not opening_balance:
+                                amts = strict_amount_pattern.findall(row_str)
+                                if amts:
+                                    opening_balance = float(amts[-1].replace(',', ''))
+                            if opening_balance:
+                                running_balance = opening_balance
+                            continue
+
+                        # Date
+                        cell_date = row_cells[date_col] if (date_col != -1 and date_col < len(row_cells)) else ""
+                        d_match = date_pattern.search(cell_date) or date_pattern.search(row_str)
+                        if d_match:
+                            last_valid_date = d_match.group(0)
+
+                        if not last_valid_date:
+                            continue
+
+                        # Amounts
+                        dr_amt = clean_amount(row_cells[dr_col]) if (dr_col != -1 and dr_col < len(row_cells)) else 0.0
+                        cr_amt = clean_amount(row_cells[cr_col]) if (cr_col != -1 and cr_col < len(row_cells)) else 0.0
+                        bal_amt = clean_amount(row_cells[bal_col]) if (bal_col != -1 and bal_col < len(row_cells)) else 0.0
+
+                        vch_type = None
+                        tx_amount = 0.0
+
+                        if dr_amt > 0:
+                            vch_type = "Payment"
+                            tx_amount = dr_amt
+                            if bal_amt > 0: running_balance = bal_amt; closing_balance_detected = bal_amt
+                        elif cr_amt > 0:
+                            vch_type = "Receipt"
+                            tx_amount = cr_amt
+                            if bal_amt > 0: running_balance = bal_amt; closing_balance_detected = bal_amt
                         else:
-                            sub_rows = [[" ".join([l.strip() for l in str(c).split('\n') if l.strip()]) if c is not None else "" for c in raw_row]]
+                            num_cells = []
+                            for cell in row_cells:
+                                a = clean_amount(cell)
+                                if a > 0 and ('.' in cell or len(cell) > 3):
+                                    num_cells.append(a)
+                            if len(num_cells) >= 2:
+                                tx_amount = num_cells[-2]
+                                curr_bal = num_cells[-1]
+                                if running_balance is not None:
+                                    diff = round(curr_bal - running_balance, 2)
+                                    vch_type = "Payment" if diff < -0.01 else ("Receipt" if diff > 0.01 else ("Payment" if "DR" in row_str.upper() else "Receipt"))
+                                else:
+                                    vch_type = "Payment" if "DR" in row_str.upper() else "Receipt"
+                                running_balance = curr_bal
+                                closing_balance_detected = curr_bal
+                            elif len(num_cells) == 1:
+                                tx_amount = num_cells[0]
+                                vch_type = "Payment" if any(k in row_str.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
 
-                        for row_cells in sub_rows:
-                            row_str = " ".join(row_cells).lower()
+                        if tx_amount == 0.0:
+                            continue
 
-                            if any(kw in row_str for kw in ignore_keywords):
-                                continue
+                        # Description
+                        desc = row_cells[desc_col] if (desc_col != -1 and desc_col < len(row_cells)) else ""
+                        ref = row_cells[ref_col] if (ref_col != -1 and ref_col < len(row_cells)) else ""
+                        
+                        if not desc:
+                            words = [c for c in row_cells if not clean_amount(c) and not date_pattern.search(c) and c not in ["-", ""]]
+                            desc = " ".join(words)
 
-                            # Header Row Detection
-                            if any(k in row_str for k in ["withdrawal", "deposit", "debit", "credit", "balance"]):
-                                for idx, c in enumerate(row_cells):
-                                    c_low = c.lower()
-                                    if "date" in c_low and date_col == -1: date_col = idx
-                                    elif ("narration" in c_low or "description" in c_low or "particulars" in c_low) and desc_col == -1: desc_col = idx
-                                    elif ("ref" in c_low or "chq" in c_low or "cheque" in c_low) and ref_col == -1: ref_col = idx
-                                    elif ("withdrawal" in c_low or "debit" in c_low or "dr" in c_low) and dr_col == -1: dr_col = idx
-                                    elif ("deposit" in c_low or "credit" in c_low or "cr" in c_low) and cr_col == -1: cr_col = idx
-                                    elif "balance" in c_low and bal_col == -1: bal_col = idx
-                                header_found_global = True
-                                continue
+                        final_narration = f"{desc} {ref}".strip() if (ref and ref not in desc) else desc.strip()
 
-                            if not header_found_global and page_idx == 0:
-                                continue
-
-                            # Opening Balance
-                            if "opening balance" in row_str or "b/f" in row_str:
-                                if bal_col != -1 and bal_col < len(row_cells):
-                                    opening_balance = clean_amount(row_cells[bal_col])
-                                if not opening_balance:
-                                    amts = strict_amount_pattern.findall(row_str)
-                                    if amts:
-                                        opening_balance = float(amts[-1].replace(',', ''))
-                                if opening_balance:
-                                    running_balance = opening_balance
-                                continue
-
-                            # Date
-                            cell_date = row_cells[date_col] if (date_col != -1 and date_col < len(row_cells)) else ""
-                            d_match = date_pattern.search(cell_date) or date_pattern.search(row_str)
-                            if d_match:
-                                last_valid_date = d_match.group(0)
-
-                            if not last_valid_date:
-                                continue
-
-                            # Amounts
-                            dr_amt = clean_amount(row_cells[dr_col]) if (dr_col != -1 and dr_col < len(row_cells)) else 0.0
-                            cr_amt = clean_amount(row_cells[cr_col]) if (cr_col != -1 and cr_col < len(row_cells)) else 0.0
-                            bal_amt = clean_amount(row_cells[bal_col]) if (bal_col != -1 and bal_col < len(row_cells)) else 0.0
-
-                            vch_type = None
-                            tx_amount = 0.0
-
-                            if dr_amt > 0:
-                                vch_type = "Payment"
-                                tx_amount = dr_amt
-                                if bal_amt > 0: running_balance = bal_amt; closing_balance_detected = bal_amt
-                            elif cr_amt > 0:
-                                vch_type = "Receipt"
-                                tx_amount = cr_amt
-                                if bal_amt > 0: running_balance = bal_amt; closing_balance_detected = bal_amt
-                            else:
-                                num_cells = []
-                                for cell in row_cells:
-                                    a = clean_amount(cell)
-                                    if a > 0 and ('.' in cell or len(cell) > 3):
-                                        num_cells.append(a)
-                                if len(num_cells) >= 2:
-                                    tx_amount = num_cells[-2]
-                                    curr_bal = num_cells[-1]
-                                    if running_balance is not None:
-                                        diff = round(curr_bal - running_balance, 2)
-                                        vch_type = "Payment" if diff < -0.01 else ("Receipt" if diff > 0.01 else ("Payment" if "DR" in row_str.upper() else "Receipt"))
-                                    else:
-                                        vch_type = "Payment" if "DR" in row_str.upper() else "Receipt"
-                                    running_balance = curr_bal
-                                    closing_balance_detected = curr_bal
-                                elif len(num_cells) == 1:
-                                    tx_amount = num_cells[0]
-                                    vch_type = "Payment" if any(k in row_str.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
-
-                            if tx_amount == 0.0:
-                                continue
-
-                            # Description & Ref
-                            desc = row_cells[desc_col] if (desc_col != -1 and desc_col < len(row_cells)) else ""
-                            ref = row_cells[ref_col] if (ref_col != -1 and ref_col < len(row_cells)) else ""
-                            
-                            if not desc:
-                                words = [c for c in row_cells if not clean_amount(c) and not date_pattern.search(c) and c not in ["-", ""]]
-                                desc = " ".join(words)
-
-                            final_narration = f"{desc} {ref}".strip() if (ref and ref not in desc) else desc.strip()
-
-                            page_extracted_rows.append({
-                                "Date_Tally": parse_tally_date(last_valid_date),
-                                "Date_Display": last_valid_date,
-                                "Narration": final_narration if final_narration else "Bank Entry",
-                                "VoucherType": vch_type if vch_type else "Receipt",
-                                "Amount": float(tx_amount)
-                            })
+                        page_extracted_rows.append({
+                            "Date_Tally": parse_tally_date(last_valid_date),
+                            "Date_Display": last_valid_date,
+                            "Narration": final_narration if final_narration else "Bank Entry",
+                            "VoucherType": vch_type if vch_type else "Receipt",
+                            "Amount": float(tx_amount)
+                        })
 
             # --- STRATEGY 2: FALLBACK TEXT EXTRACTION ---
             if not page_extracted_rows:
@@ -340,7 +322,7 @@ def process_pdf_precision_multipage(pdf_file, password=None):
 
                         clean_n = line
                         for a_s in amt_strs: clean_n = clean_n.replace(a_s, '')
-                        if d_match: clean_n = clean_n.replace(d_str, '')
+                        if d_match: clean_n = clean_n.replace(d_match.group(0), '')
 
                         words = [w for w in clean_n.split() if not (w.isdigit() and len(w) <= 4)]
                         final_n = " ".join(words) if words else "Bank Entry"
