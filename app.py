@@ -25,7 +25,7 @@ if not st.session_state.authenticated:
 
 # App Header
 st.title("🤖 BuddyAI - Universal Bank Statement Converter")
-st.write("Precision Engine: Universal Text & Table Block Aggregator with Full Deposit/Receipt Detection.")
+st.write("Precision Engine: Multi-Page Table & Text Aggregator with Persistent Date Tracking.")
 
 # Bank Selection Dropdown
 bank_option = st.selectbox(
@@ -137,7 +137,7 @@ def process_pdf_precision_multipage(pdf_file, password=None):
     date_pattern = re.compile(
         r'\b(0?[1-9]|[12][0-9]|3[01])[\/\-\.\s](0?[1-9]|1[0-2]|[A-Za-z]{3}|\d{1,2})[\/\-\.\s](20\d{2}|\d{2})\b'
     )
-    strict_amount_pattern = re.compile(r'\b\d{1,3}(?:,\d{2,3})*\.\d{2}\b')
+    strict_amount_pattern = re.compile(r'\b\d+(?:,\d+)*\.\d{2}(?!\.\d)\b')
 
     ignore_keywords = [
         "generated on", "legends used", "account statement",
@@ -146,6 +146,7 @@ def process_pdf_precision_multipage(pdf_file, password=None):
     ]
 
     parsed_rows = []
+    last_valid_date = None
     running_balance = None
     opening_balance = None
     closing_balance_detected = None
@@ -202,12 +203,14 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                                 running_balance = opening_balance
                             continue
 
-                        # Date
+                        # Date Check: Update last_valid_date if date is present in this row
                         cell_date = row_cells[date_col] if (date_col != -1 and date_col < len(row_cells)) else ""
                         d_match = date_pattern.search(cell_date) or date_pattern.search(row_str)
-                        if not d_match:
+                        if d_match:
+                            last_valid_date = d_match.group(0)
+
+                        if not last_valid_date:
                             continue
-                        last_valid_date = d_match.group(0)
 
                         # Amounts
                         dr_amt = clean_amount(row_cells[dr_col]) if (dr_col != -1 and dr_col < len(row_cells)) else 0.0
@@ -273,19 +276,24 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                             continue
 
                         d_match = date_pattern.search(line)
+                        amt_strs = strict_amount_pattern.findall(line)
+
                         is_new = False
-                        if d_match and d_match.start() < 15:
-                            amts_in_line = strict_amount_pattern.findall(line)
-                            if len(amts_in_line) > 0:
-                                is_new = True
+                        if d_match and d_match.start() < 20 and len(amt_strs) > 0:
+                            is_new = True
+                        elif len(amt_strs) >= 2 and current_block is not None:
+                            # Same-date consecutive entry where Date cell is blank
+                            is_new = True
 
                         if is_new:
                             if current_block:
                                 tx_blocks.append(current_block)
                             current_block = {
-                                "date": d_match.group(0),
+                                "date": d_match.group(0) if d_match else (current_block["date"] if current_block else last_valid_date),
                                 "lines": [line]
                             }
+                            if d_match:
+                                last_valid_date = d_match.group(0)
                         else:
                             if current_block:
                                 current_block["lines"].append(line)
@@ -295,12 +303,12 @@ def process_pdf_precision_multipage(pdf_file, password=None):
 
                     for block in tx_blocks:
                         full_text = " ".join(block["lines"])
-                        d_str = block["date"]
+                        d_str = block["date"] if block.get("date") else last_valid_date
 
                         amt_strs = strict_amount_pattern.findall(full_text)
                         amt_flts = [float(a.replace(',', '')) for a in amt_strs]
 
-                        if not amt_flts: continue
+                        if not amt_flts or not d_str: continue
 
                         tx_amt = 0.0
                         vch_type = "Receipt"
