@@ -25,7 +25,7 @@ if not st.session_state.authenticated:
 
 # App Header
 st.title("🤖 BuddyAI - Universal Bank Statement Converter")
-st.write("Precision Engine: Multi-Page Table & Text Aggregator with Axis Bank Fallback Patch.")
+st.write("Precision Engine: Multi-Page Table & Text Aggregator with Axis Balance Filter & HDFC Unmerge Patch.")
 
 # Bank Selection Dropdown
 bank_option = st.selectbox(
@@ -124,7 +124,6 @@ def parse_tally_date(date_raw):
 def clean_amount(val_str):
     if not val_str:
         return 0.0
-    # Clean non-breaking spaces (\xa0) and commas
     val_clean = str(val_str).replace('\xa0', ' ').replace(',', '').strip()
     match = re.search(r'\b\d+\.\d{2}\b', val_clean)
     if match:
@@ -166,7 +165,15 @@ def process_pdf_precision_multipage(pdf_file, password=None):
             
             # --- STRATEGY 1: TABLE EXTRACTION ---
             tables = page.extract_tables()
-            if tables:
+            
+            # Detect fake merged single-row tables (common in HDFC)
+            is_fake_merged_table = False
+            if tables and len(tables) > 0:
+                tbl = tables[0]
+                if len(tbl) <= 2 and any(str(cell).count('\n') > 2 for cell in tbl[0] if cell):
+                    is_fake_merged_table = True
+
+            if tables and not is_fake_merged_table:
                 for table in tables:
                     if not table or len(table) < 1:
                         continue
@@ -220,7 +227,7 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                         if not last_valid_date:
                             continue
 
-                        # Amount Extraction with Axis Bank Fallback
+                        # Amounts Extraction with Balance Exclusion
                         dr_amt = clean_amount(row_cells[dr_col]) if (dr_col != -1 and dr_col < len(row_cells)) else 0.0
                         cr_amt = clean_amount(row_cells[cr_col]) if (cr_col != -1 and cr_col < len(row_cells)) else 0.0
                         bal_amt = clean_amount(row_cells[bal_col]) if (bal_col != -1 and bal_col < len(row_cells)) else 0.0
@@ -237,24 +244,17 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                             tx_amount = dr_amt
                             if bal_amt > 0: running_balance = bal_amt; closing_balance_detected = bal_amt
                         else:
-                            # Axis Bank Row Scan Fallback (if column mapping missed on this row)
+                            # Fallback Scanner (EXCLUDES bal_col from picking balance as tx amount)
                             num_cells = []
                             for idx, cell in enumerate(row_cells):
+                                if idx == bal_col:
+                                    continue
                                 a = clean_amount(cell)
                                 if a > 0 and ('.' in str(cell) or len(str(cell).strip()) > 3):
                                     num_cells.append((idx, a))
-                            if len(num_cells) >= 2:
-                                tx_amount = num_cells[-2][1]
-                                curr_bal = num_cells[-1][1]
-                                if running_balance is not None:
-                                    diff = round(curr_bal - running_balance, 2)
-                                    vch_type = "Payment" if diff < -0.01 else ("Receipt" if diff > 0.01 else ("Payment" if any(k in row_str.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"))
-                                else:
-                                    vch_type = "Payment" if any(k in row_str.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
-                                running_balance = curr_bal
-                                closing_balance_detected = curr_bal
-                            elif len(num_cells) == 1:
-                                tx_amount = num_cells[0][1]
+                            
+                            if len(num_cells) >= 1:
+                                tx_amount = num_cells[-1][1]
                                 vch_type = "Payment" if any(k in row_str.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
 
                         if tx_amount == 0.0:
@@ -277,7 +277,7 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                             "Amount": float(tx_amount)
                         })
 
-            # --- STRATEGY 2: UNIVERSAL TEXT BLOCK EXTRACTION ---
+            # --- STRATEGY 2: UNIVERSAL TEXT BLOCK EXTRACTION (Handles HDFC & Borderless PDFs) ---
             if not page_extracted_rows:
                 text = page.extract_text(layout=False)
                 if text:
