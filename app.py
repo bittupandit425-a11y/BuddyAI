@@ -325,85 +325,96 @@ def process_pdf_full_narration_engine(pdf_file, password=None):
 
     return parsed_rows, opening_balance, closing_balance_detected
 
-def process_pdf_spatial_standalone_engine(pdf_file, password=None):
-    """11zon-style Spatial Text/Layout Parser for Borderless/Complex PDFs like HDFC"""
-    spatial_table_settings = {
-        "vertical_strategy": "text",
-        "horizontal_strategy": "text",
-        "snap_tolerance": 4,
-        "join_tolerance": 4
-    }
-    
-    date_pattern = re.compile(
-        r'\b(0?[1-9]|[12][0-9]|3[01])[\/\-\.\s](0?[1-9]|1[0-2]|[A-Za-z]{3}|\d{1,2})[\/\-\.\s](20\d{2}|\d{2})\b'
-    )
+def process_pdf_universal_standalone_engine(pdf_file, password=None):
+    """11zon-style Universal Spatial Crop & Table Extraction Engine for All Banks"""
+    header_keywords = ["date", "narration", "particulars", "description", "details", "withdrawal", "deposit", "debit", "credit", "balance"]
+    date_pattern = re.compile(r'\b(0?[1-9]|[12][0-9]|3[01])[\/\-\.\s](0?[1-9]|1[0-2]|[A-Za-z]{3}|\d{1,2})[\/\-\.\s](20\d{2}|\d{2})\b')
 
     rows = []
-    current_row = None
+    current_tx = None
 
     with pdfplumber.open(pdf_file, password=password if password else None) as pdf:
         for page in pdf.pages:
-            tables = page.extract_tables(spatial_table_settings)
+            # 1. Dynamic Header Cropping: Find header row Y-coordinate
+            words = page.extract_words()
+            header_y = None
+
+            for w in words:
+                if w['text'].lower() in header_keywords:
+                    header_y = w['top'] - 10
+                    break
+
+            # Crop top header noise if found
+            crop_page = page.crop((0, header_y, page.width, page.height)) if header_y and header_y > 20 else page
+
+            # 2. Extract Table using Spatial Text Strategy
+            tables = crop_page.extract_tables({
+                "vertical_strategy": "text",
+                "horizontal_strategy": "text",
+                "snap_tolerance": 3,
+                "join_tolerance": 3
+            })
+
             if not tables:
-                text = page.extract_text()
+                text = crop_page.extract_text()
                 if not text: continue
                 lines = [l.strip() for l in text.split('\n') if l.strip()]
-                tables = [[ [l] for l in lines ]]
+                tables = [[[l] for l in lines]]
 
             for tbl in tables:
                 for raw_r in tbl:
                     if not raw_r: continue
                     clean_cells = [" ".join([str(sub).strip() for sub in str(cell).split('\n') if sub.strip()]) if cell else "" for cell in raw_r]
-                    row_line = " ".join(clean_cells).strip()
-                    if not row_line or any(k in row_line.lower() for k in ["generated on", "statement of account", "page "]): continue
+                    row_str = " ".join(clean_cells).strip()
 
-                    d_match = date_pattern.search(row_line)
+                    if not row_str or any(k in row_str.lower() for k in ["generated on", "statement of account", "page ", "legends used"]):
+                        continue
+
+                    d_match = date_pattern.search(row_str)
                     amts = [clean_amount(c) for c in clean_cells if clean_amount(c) > 0]
 
                     if d_match or len(amts) >= 1:
-                        if current_row:
-                            rows.append(current_row)
-                        
+                        if current_tx:
+                            rows.append(current_tx)
+
                         w_amt = 0.0
                         dep_amt = 0.0
                         c_bal = 0.0
 
                         if len(amts) >= 3:
-                            w_amt = amts[0] if "dr" in row_line.lower() or "debit" in row_line.lower() or "withdrawal" in row_line.lower() else 0.0
-                            dep_amt = amts[0] if w_amt == 0.0 else (amts[1] if len(amts) > 2 else 0.0)
+                            if any(k in row_str.lower() for k in ["dr", "debit", "withdrawal"]):
+                                w_amt = amts[0]
+                                dep_amt = amts[1] if len(amts) > 3 else 0.0
+                            else:
+                                dep_amt = amts[0]
                             c_bal = amts[-1]
                         elif len(amts) == 2:
-                            if "dr" in row_line.lower() or "debit" in row_line.lower() or "withdrawal" in row_line.lower():
+                            if any(k in row_str.lower() for k in ["dr", "debit", "withdrawal"]):
                                 w_amt = amts[0]
                             else:
                                 dep_amt = amts[0]
                             c_bal = amts[1]
                         elif len(amts) == 1:
-                            if "dr" in row_line.lower() or "debit" in row_line.lower():
+                            if any(k in row_str.lower() for k in ["dr", "debit", "withdrawal"]):
                                 w_amt = amts[0]
                             else:
                                 dep_amt = amts[0]
 
-                        # Clean narration text
-                        narr_words = []
-                        for cell in clean_cells:
-                            if not clean_amount(cell) and not date_pattern.search(cell):
-                                if cell not in ["-", ""]: narr_words.append(cell)
+                        narr_words = [c for c in clean_cells if not clean_amount(c) and not date_pattern.search(c) and c not in ["-", ""]]
 
-                        current_row = {
+                        current_tx = {
                             "Date": d_match.group(0) if d_match else "",
-                            "Narration": " ".join(narr_words).strip() if narr_words else "Transaction Entry",
+                            "Narration": " ".join(narr_words).strip() if narr_words else "Bank Entry",
                             "Withdrawal Amt": w_amt if w_amt > 0 else None,
                             "Deposit Amt": dep_amt if dep_amt > 0 else None,
                             "Closing Balance": c_bal if c_bal > 0 else None
                         }
                     else:
-                        if current_row and row_line:
-                            current_row["Narration"] = (current_row["Narration"] + " " + row_line).strip()
+                        if current_tx and row_str:
+                            current_tx["Narration"] = (current_tx["Narration"] + " " + row_str).strip()
 
-            if current_row:
-                rows.append(current_row)
-                current_row = None
+        if current_tx:
+            rows.append(current_tx)
 
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
@@ -554,7 +565,7 @@ def generate_balanced_tally_xml(rows, bank_ledger):
 tab1, tab2, tab3 = st.tabs([
     "📄 PDF to Excel & XML (With Live Editor)", 
     "📊 Excel to Tally XML (Direct Convertor)", 
-    "📑 Standalone PDF to Excel (11zon Engine)"
+    "📑 Universal PDF to Excel (11zon Spatial Engine)"
 ])
 
 # ==================== TAB 1: PDF CONVERTER & EDITABLE PREVIEW ====================
@@ -741,22 +752,22 @@ with tab2:
         except Exception as e:
             st.error(f"❌ Error reading Excel file: {str(e)}")
 
-# ==================== TAB 3: STANDALONE PDF TO EXCEL CONVERTER ====================
+# ==================== TAB 3: UNIVERSAL STANDALONE PDF TO EXCEL ====================
 with tab3:
-    st.header("📑 Standalone PDF to Excel Converter (11zon Spatial Engine)")
-    st.write("Complex / Borderless PDF bank statements (jaise HDFC) ko directly clean Excel sheet mein convert karein.")
+    st.header("📑 Universal Standalone PDF to Excel Converter")
+    st.write("Kisi bhi Bank ki Borderless ya Complex PDF statement ko directly clean Excel sheet mein convert karein (Dynamic Header Crop Engine).")
     
     col_t3_a, col_t3_b = st.columns(2)
     with col_t3_a:
-        st.info("⚙️ Parsing Strategy: **Spatial X-Y Layout Alignment (Border Independent)**")
+        st.info("⚙️ Engine: **Universal Spatial Layout & Dynamic Header Crop (11zon Style)**")
     with col_t3_b:
         standalone_pass = st.text_input("🔑 PDF Password (If Protected):", type="password", key="tab3_pass")
         
-    uploaded_standalone_pdf = st.file_uploader("📂 Upload PDF Statement for Excel Extraction", type=["pdf"], key="tab3_pdf")
+    uploaded_standalone_pdf = st.file_uploader("📂 Upload Any Bank PDF Statement for Excel Extraction", type=["pdf"], key="tab3_pdf")
     
     if uploaded_standalone_pdf is not None:
-        with st.spinner("⌛ Extracting PDF with Spatial X-Y Engine..."):
-            df_standalone = process_pdf_spatial_standalone_engine(uploaded_standalone_pdf, password=standalone_pass)
+        with st.spinner("⌛ Extracting PDF with Universal Spatial Engine..."):
+            df_standalone = process_pdf_universal_standalone_engine(uploaded_standalone_pdf, password=standalone_pass)
             
         if not df_standalone.empty:
             st.success(f"✅ Extracted {len(df_standalone)} Rows Successfully!")
@@ -774,9 +785,9 @@ with tab3:
             st.download_button(
                 label="📥 Download Clean Excel File (.xlsx)",
                 data=sa_excel_data,
-                file_name="BuddyAI_Direct_Parsed_Statement.xlsx",
+                file_name="BuddyAI_Universal_Parsed_Statement.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
         else:
-            st.warning("⚠️ Could not extract rows using Spatial Engine. Please verify PDF layout or password.")
+            st.warning("⚠️ Could not extract rows. Please verify PDF layout or password.")
