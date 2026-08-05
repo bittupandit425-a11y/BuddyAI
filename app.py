@@ -89,7 +89,7 @@ def parse_tally_date(date_raw):
     return "20250401"
 
 def clean_amount(val_str):
-    if not val_str: return 0.0
+    if not val_str or pd.isna(val_str): return 0.0
     val_clean = str(val_str).replace('\xa0', ' ').replace(',', '').strip()
     match = re.search(r'\b\d+\.\d{2}\b', val_clean)
     if match:
@@ -127,7 +127,6 @@ def process_pdf_full_narration_engine(pdf_file, password=None):
         for page_idx, page in enumerate(pdf.pages):
             page_extracted_rows = []
             
-            # --- STRATEGY 1: TABLE EXTRACTION ---
             tables = page.extract_tables()
             
             is_fake_merged_table = False
@@ -143,7 +142,6 @@ def process_pdf_full_narration_engine(pdf_file, password=None):
                     for raw_row in table:
                         if not raw_row: continue
 
-                        # Full multi-line narration inner join
                         row_cells = [" ".join([l.strip() for l in str(c).split('\n') if l.strip()]) if c is not None else "" for c in raw_row]
                         row_str = " ".join(row_cells).lower()
 
@@ -225,7 +223,6 @@ def process_pdf_full_narration_engine(pdf_file, password=None):
                             "Amount": float(tx_amount)
                         })
 
-            # --- STRATEGY 2: UNIVERSAL TEXT BLOCK EXTRACTION (Full Multi-line Narration Engine) ---
             if not page_extracted_rows:
                 text = page.extract_text(layout=False)
                 if text:
@@ -318,6 +315,87 @@ def process_pdf_full_narration_engine(pdf_file, password=None):
 
     return parsed_rows, opening_balance, closing_balance_detected
 
+def process_excel_full_narration_engine(uploaded_excel):
+    if uploaded_excel.name.endswith('.csv'):
+        df_raw = pd.read_csv(uploaded_excel)
+    else:
+        df_raw = pd.read_excel(uploaded_excel)
+
+    date_col, narr_col, dr_col, cr_col, bal_col = None, None, None, None, None
+    for col in df_raw.columns:
+        c_low = str(col).lower().strip()
+        if "date" in c_low and not date_col: date_col = col
+        elif any(k in c_low for k in ["narration", "particular", "description", "details"]) and not narr_col: narr_col = col
+        elif any(k in c_low for k in ["withdrawal", "debit", "dr"]) and not dr_col: dr_col = col
+        elif any(k in c_low for k in ["deposit", "credit", "cr"]) and not cr_col: cr_col = col
+        elif "balance" in c_low and not bal_col: bal_col = col
+
+    date_pattern = re.compile(
+        r'\b(0?[1-9]|[12][0-9]|3[01])[\/\-\.\s](0?[1-9]|1[0-2]|[A-Za-z]{3}|\d{1,2})[\/\-\.\s](20\d{2}|\d{2})\b'
+    )
+
+    cleaned_rows = []
+    current_tx = None
+    opening_balance = None
+    running_balance = None
+    closing_balance_detected = None
+
+    for idx, row in df_raw.iterrows():
+        raw_date_cell = str(row[date_col]).strip() if date_col and pd.notna(row[date_col]) else ""
+        d_match = date_pattern.search(raw_date_cell)
+
+        dr_val = clean_amount(row[dr_col]) if dr_col and pd.notna(row[dr_col]) else 0.0
+        cr_val = clean_amount(row[cr_col]) if cr_col and pd.notna(row[cr_col]) else 0.0
+        bal_val = clean_amount(row[bal_col]) if bal_col and pd.notna(row[bal_col]) else 0.0
+
+        narr_text = str(row[narr_col]).strip() if narr_col and pd.notna(row[narr_col]) else ""
+        if narr_text.lower() in ["nan", "none"]: narr_text = ""
+
+        row_str = " ".join([str(val) for val in row.values if pd.notna(val)]).lower()
+
+        if "opening" in row_str or "b/f" in row_str:
+            if bal_val > 0:
+                opening_balance = bal_val
+                running_balance = bal_val
+            continue
+
+        is_new_tx = False
+        if d_match:
+            is_new_tx = True
+        elif (dr_val > 0 or cr_val > 0) and current_tx is not None:
+            is_new_tx = True
+
+        if is_new_tx:
+            if current_tx:
+                cleaned_rows.append(current_tx)
+
+            vch_type = "Receipt" if cr_val > 0 else "Payment"
+            tx_amt = cr_val if cr_val > 0 else dr_val
+
+            d_str = d_match.group(0) if d_match else (current_tx["Date_Display"] if current_tx else "01/04/2025")
+
+            current_tx = {
+                "Date_Display": d_str,
+                "Date_Tally": parse_tally_date(d_str),
+                "VoucherType": vch_type,
+                "Amount": float(tx_amt),
+                "Narration": narr_text
+            }
+
+            if bal_val > 0:
+                if running_balance is None and tx_amt > 0:
+                    opening_balance = (bal_val - tx_amt) if vch_type == "Receipt" else (bal_val + tx_amt)
+                running_balance = bal_val
+                closing_balance_detected = bal_val
+        else:
+            if current_tx and narr_text:
+                current_tx["Narration"] = (current_tx["Narration"] + " " + narr_text).strip()
+
+    if current_tx:
+        cleaned_rows.append(current_tx)
+
+    return cleaned_rows, opening_balance, closing_balance_detected
+
 def generate_balanced_tally_xml(rows, bank_ledger):
     xml_lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -380,7 +458,7 @@ def generate_balanced_tally_xml(rows, bank_ledger):
     ])
     return "\n".join(xml_lines)
 
-# --- CREATING CLEAN TWO TABS FOR ZERO CONFUSION ---
+# --- CLEAN TWO TABS FOR ZERO CONFUSION ---
 tab1, tab2 = st.tabs(["📄 PDF to Excel & XML (With Live Editor)", "📊 Excel to Tally XML (Direct Convertor)"])
 
 # ==================== TAB 1: PDF CONVERTER & EDITABLE PREVIEW ====================
@@ -435,7 +513,6 @@ with tab1:
             st.subheader("📋 Extracted Vouchers Preview (Editable)")
             st.info("💡 Tip: Aap kisi bhi cell (Date, Amount, Narration, VoucherType) par double-click karke use screen par hi direct edit kar sakte hain!")
             
-            # Interactive Data Editor
             edited_df = st.data_editor(
                 df_extracted[["Date_Display", "VoucherType", "Amount", "Narration"]],
                 num_rows="dynamic",
@@ -443,7 +520,6 @@ with tab1:
                 key="vouchers_editor"
             )
             
-            # Recalculate Dashboard based on Live Edited DataFrame
             st.markdown("---")
             st.subheader("📊 Live Financial Audit Dashboard")
             
@@ -466,7 +542,6 @@ with tab1:
             
             col1, col2 = st.columns(2)
             
-            # Excel Download
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 edited_df.to_excel(writer, index=False)
@@ -481,7 +556,6 @@ with tab1:
                     use_container_width=True
                 )
                 
-            # XML Download from Edited Data
             edited_rows = edited_df.to_dict('records')
             for r in edited_rows:
                 r["Date_Tally"] = parse_tally_date(r.get("Date_Display", ""))
@@ -500,7 +574,7 @@ with tab1:
 # ==================== TAB 2: EXCEL TO TALLY XML DIRECT CONVERTER ====================
 with tab2:
     st.header("📊 Convert Standard Excel File directly to Tally XML")
-    st.write("Apni kisi bhi Excel/CSV file ko Tally Import XML mein convert karein.")
+    st.write("Apni kisi bhi Excel/CSV file ko Tally Import XML mein convert karein (Multi-line narration multi-row grouping support ke saath).")
     
     col_x, col_y = st.columns(2)
     with col_x:
@@ -510,40 +584,63 @@ with tab2:
 
     if uploaded_excel is not None:
         try:
-            if uploaded_excel.name.endswith('.csv'):
-                df_excel = pd.read_csv(uploaded_excel)
+            excel_rows, ex_op_bal, ex_cl_bal = process_excel_full_narration_engine(uploaded_excel)
+            
+            if excel_rows:
+                df_excel_extracted = pd.DataFrame(excel_rows)
+                df_excel_extracted['Amount'] = pd.to_numeric(df_excel_extracted['Amount'], errors='coerce').fillna(0.0)
+                
+                st.success(f"✅ Excel Processed Successfully! Found {len(df_excel_extracted)} Clean Vouchers.")
+                
+                st.markdown("---")
+                st.subheader("📋 Extracted Excel Vouchers Preview (Editable)")
+                st.info("💡 Tip: Aap kisi bhi cell (Date, Amount, Narration, VoucherType) par double-click karke use screen par hi direct edit kar sakte hain!")
+                
+                edited_excel_df = st.data_editor(
+                    df_excel_extracted[["Date_Display", "VoucherType", "Amount", "Narration"]],
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key="excel_vouchers_editor"
+                )
+                
+                st.markdown("---")
+                st.subheader("📊 Live Financial Audit Dashboard (Excel)")
+                
+                ex_receipts_df = edited_excel_df[edited_excel_df['VoucherType'] == 'Receipt']
+                ex_payments_df = edited_excel_df[edited_excel_df['VoucherType'] == 'Payment']
+                
+                ex_total_receipts = float(ex_receipts_df['Amount'].sum()) if not ex_receipts_df.empty else 0.0
+                ex_total_payments = float(ex_payments_df['Amount'].sum()) if not ex_payments_df.empty else 0.0
+                ex_total_count = len(edited_excel_df)
+                
+                ex_op_val = float(ex_op_bal) if ex_op_bal is not None else 0.0
+                ex_calc_closing = ex_op_val + ex_total_receipts - ex_total_payments
+                
+                em1, em2, em3, em4, em5 = st.columns(5)
+                em1.metric("Opening Balance", f"₹ {ex_op_val:,.2f}")
+                em2.metric("Total Extracted", f"{ex_total_count} Vouchers")
+                em3.metric("Total Credit (+)", f"₹ {ex_total_receipts:,.2f}")
+                em4.metric("Total Debit (-)", f"₹ {ex_total_payments:,.2f}")
+                em5.metric("Calculated Closing", f"₹ {ex_calc_closing:,.2f}")
+                
+                if ex_cl_bal is not None:
+                    st.info(f"ℹ️ Statement Closing Balance detected: ₹ {float(ex_cl_bal):,.2f}")
+                
+                edited_ex_rows = edited_excel_df.to_dict('records')
+                for r in edited_ex_rows:
+                    r["Date_Tally"] = parse_tally_date(r.get("Date_Display", ""))
+                
+                excel_xml_output = generate_balanced_tally_xml(edited_ex_rows, excel_ledger_name)
+                
+                st.markdown("---")
+                st.download_button(
+                    label="📄 Download Validated Tally XML From Excel",
+                    data=excel_xml_output,
+                    file_name="BuddyAI_Excel_To_Tally.xml",
+                    mime="application/xml",
+                    use_container_width=True
+                )
             else:
-                df_excel = pd.read_excel(uploaded_excel)
-            
-            st.success(f"✅ Excel Loaded Successfully! Found {len(df_excel)} rows.")
-            st.dataframe(df_excel.head(10), use_container_width=True)
-            
-            excel_rows = []
-            for _, r in df_excel.iterrows():
-                row_dict = r.to_dict()
-                
-                # Column Name Normalization
-                d_val = row_dict.get("Date_Display") or row_dict.get("Date") or row_dict.get("date") or ""
-                v_type = row_dict.get("VoucherType") or row_dict.get("Type") or row_dict.get("vouchertype") or "Receipt"
-                amt_val = row_dict.get("Amount") or row_dict.get("amount") or 0.0
-                narr_val = row_dict.get("Narration") or row_dict.get("narration") or row_dict.get("Description") or "Bank Entry"
-                
-                excel_rows.append({
-                    "Date_Display": str(d_val),
-                    "Date_Tally": parse_tally_date(d_val),
-                    "VoucherType": str(v_type).capitalize(),
-                    "Amount": clean_amount(amt_val),
-                    "Narration": str(narr_val)
-                })
-            
-            excel_xml_output = generate_balanced_tally_xml(excel_rows, excel_ledger_name)
-            
-            st.download_button(
-                label="📄 Download Tally XML From Excel",
-                data=excel_xml_output,
-                file_name="BuddyAI_Excel_To_Tally.xml",
-                mime="application/xml",
-                use_container_width=True
-            )
+                st.warning("⚠️ No valid transaction rows could be parsed from the Excel file.")
         except Exception as e:
             st.error(f"❌ Error reading Excel file: {str(e)}")
