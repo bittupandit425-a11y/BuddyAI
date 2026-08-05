@@ -89,9 +89,19 @@ def parse_tally_date(date_raw):
     return "20250401"
 
 def clean_amount(val_str):
-    if not val_str or pd.isna(val_str): return 0.0
+    if val_str is None or pd.isna(val_str): return 0.0
+    if isinstance(val_str, (int, float)):
+        return abs(float(val_str))
+    
     val_clean = str(val_str).replace('\xa0', ' ').replace(',', '').strip()
-    match = re.search(r'\b\d+\.\d{2}\b', val_clean)
+    if not val_clean or val_clean.lower() in ['nan', 'none', '-', '']: return 0.0
+    
+    try:
+        return abs(float(val_clean))
+    except ValueError:
+        pass
+        
+    match = re.search(r'\b\d+(?:\.\d{1,2})?\b', val_clean)
     if match:
         try: return abs(float(match.group()))
         except ValueError: return 0.0
@@ -101,7 +111,7 @@ def process_pdf_full_narration_engine(pdf_file, password=None):
     date_pattern = re.compile(
         r'\b(0?[1-9]|[12][0-9]|3[01])[\/\-\.\s](0?[1-9]|1[0-2]|[A-Za-z]{3}|\d{1,2})[\/\-\.\s](20\d{2}|\d{2})\b'
     )
-    strict_amount_pattern = re.compile(r'\b\d+(?:,\d+)*\.\d{2}(?!\.\d)\b')
+    strict_amount_pattern = re.compile(r'\b\d+(?:,\d+)*(?:\.\d{1,2})?\b')
 
     ignore_keywords = [
         "generated on", "legends used", "account statement",
@@ -166,7 +176,7 @@ def process_pdf_full_narration_engine(pdf_file, password=None):
                                 if bal_col != -1 and bal_col < len(row_cells): opening_balance = clean_amount(row_cells[bal_col])
                                 if not opening_balance:
                                     amts = strict_amount_pattern.findall(row_str)
-                                    if amts: opening_balance = float(amts[-1].replace(',', ''))
+                                    if amts: opening_balance = clean_amount(amts[-1])
                                 if opening_balance: running_balance = opening_balance
                             elif "closing" in row_str or "c/f" in row_str:
                                 if bal_col != -1 and bal_col < len(row_cells): closing_balance_detected = clean_amount(row_cells[bal_col])
@@ -198,7 +208,7 @@ def process_pdf_full_narration_engine(pdf_file, password=None):
                             for idx, cell in enumerate(row_cells):
                                 if idx == bal_col: continue
                                 a = clean_amount(cell)
-                                if a > 0 and ('.' in str(cell) or len(str(cell).strip()) > 3):
+                                if a > 0:
                                     num_cells.append((idx, a))
                             if len(num_cells) >= 1:
                                 tx_amount = num_cells[-1][1]
@@ -239,7 +249,7 @@ def process_pdf_full_narration_engine(pdf_file, password=None):
                             if ("opening" in line_low or "b/f" in line_low) and opening_balance is None:
                                 amts = strict_amount_pattern.findall(line)
                                 if amts:
-                                    opening_balance = float(amts[-1].replace(',', ''))
+                                    opening_balance = clean_amount(amts[-1])
                                     running_balance = opening_balance
                             continue
 
@@ -270,7 +280,7 @@ def process_pdf_full_narration_engine(pdf_file, password=None):
                         d_str = block["date"] if block.get("date") else last_valid_date
 
                         amt_strs = strict_amount_pattern.findall(full_text)
-                        amt_flts = [float(a.replace(',', '')) for a in amt_strs]
+                        amt_flts = [clean_amount(a) for a in amt_strs if clean_amount(a) > 0]
 
                         if not amt_flts or not d_str: continue
 
