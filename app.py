@@ -468,8 +468,11 @@ def generate_balanced_tally_xml(rows, bank_ledger):
     ])
     return "\n".join(xml_lines)
 
-# --- CLEAN TWO TABS FOR ZERO CONFUSION ---
-tab1, tab2 = st.tabs(["📄 PDF to Excel & XML (With Live Editor)", "📊 Excel to Tally XML (Direct Convertor)"])
+# --- CLEAN TWO TABS LAYOUT ---
+tab1, tab2 = st.tabs([
+    "📄 PDF to Excel & XML (With Live Editor)", 
+    "📊 Excel to Tally XML (Direct Convertor)"
+])
 
 # ==================== TAB 1: PDF CONVERTER & EDITABLE PREVIEW ====================
 with tab1:
