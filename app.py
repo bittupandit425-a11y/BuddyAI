@@ -24,30 +24,7 @@ if not st.session_state.authenticated:
     st.stop()
 
 # App Header
-st.title("🤖 BuddyAI - Universal Bank Statement Converter")
-st.write("Precision Engine: Multi-Page Table & Text Aggregator with Axis Balance Filter & HDFC Unmerge Patch.")
-
-# Bank Selection Dropdown
-bank_option = st.selectbox(
-    "🏦 Select Bank Format / Engine:",
-    [
-        "Auto-Detect Bank Format",
-        "Kotak Mahindra Bank",
-        "ICICI Bank",
-        "HDFC Bank",
-        "State Bank of India (SBI)",
-        "Punjab National Bank (PNB)",
-        "Bank of Baroda (BOB)",
-        "Canara Bank",
-        "Union Bank of India",
-        "Axis Bank",
-        "Universal / General Bank"
-    ]
-)
-
-tally_bank_ledger = st.text_input("🏦 Tally Bank Ledger Name (Exact Tally Name):", value="Bank Account")
-pdf_password = st.text_input("🔑 PDF Password (If protected, enter password here):", type="password")
-uploaded_file = st.file_uploader("📂 Upload PDF Bank Statement (Multi-page supported)", type=["pdf"])
+st.title("🤖 BuddyAI - Universal Bank Statement Engine")
 
 BANK_SIGNATURE_MAP = {
     "STATE BANK OF INDIA": ("State Bank of India (SBI)", "Class A"),
@@ -66,15 +43,7 @@ BANK_SIGNATURE_MAP = {
     "KOTAK MAHINDRA BANK": ("Kotak Mahindra Bank", "Class A"),
     "INDUSIND BANK": ("IndusInd Bank", "Class A"),
     "YES BANK": ("Yes Bank", "Class A"),
-    "IDFC FIRST BANK": ("IDFC FIRST Bank", "Class A"),
-    "FEDERAL BANK": ("Federal Bank", "Class B"),
-    "SOUTH INDIAN BANK": ("South Indian Bank", "Class B"),
-    "AU SMALL FINANCE BANK": ("AU Small Finance Bank", "Class B"),
-    "EQUITAS SMALL FINANCE BANK": ("Equitas Small Finance Bank", "Class B"),
-    "INDIA POST PAYMENTS BANK": ("India Post Payments Bank (IPPB)", "Class B"),
-    "IPPB": ("India Post Payments Bank (IPPB)", "Class B"),
-    "AIRTEL PAYMENTS BANK": ("Airtel Payments Bank", "Class B"),
-    "FINO PAYMENTS BANK": ("Fino Payments Bank", "Class B")
+    "IDFC FIRST BANK": ("IDFC FIRST Bank", "Class A")
 }
 
 def detect_bank_and_type(pdf_file, password=None):
@@ -84,8 +53,7 @@ def detect_bank_and_type(pdf_file, password=None):
         with pdfplumber.open(pdf_file, password=password if password else None) as pdf:
             for page in pdf.pages[:3]:
                 t = page.extract_text()
-                if t:
-                    extracted_text += " " + t.upper()
+                if t: extracted_text += " " + t.upper()
             if len(extracted_text.strip()) < 50:
                 is_scanned = True
     except Exception as e:
@@ -105,8 +73,7 @@ def detect_bank_and_type(pdf_file, password=None):
     return detected_name, detected_class, is_scanned, "OK"
 
 def parse_tally_date(date_raw):
-    if not date_raw:
-        return "20250401"
+    if not date_raw: return "20250401"
     date_clean = str(date_raw).strip()
     formats = [
         "%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y",
@@ -122,18 +89,15 @@ def parse_tally_date(date_raw):
     return "20250401"
 
 def clean_amount(val_str):
-    if not val_str:
-        return 0.0
+    if not val_str: return 0.0
     val_clean = str(val_str).replace('\xa0', ' ').replace(',', '').strip()
     match = re.search(r'\b\d+\.\d{2}\b', val_clean)
     if match:
-        try:
-            return abs(float(match.group()))
-        except ValueError:
-            return 0.0
+        try: return abs(float(match.group()))
+        except ValueError: return 0.0
     return 0.0
 
-def process_pdf_precision_multipage(pdf_file, password=None):
+def process_pdf_full_narration_engine(pdf_file, password=None):
     date_pattern = re.compile(
         r'\b(0?[1-9]|[12][0-9]|3[01])[\/\-\.\s](0?[1-9]|1[0-2]|[A-Za-z]{3}|\d{1,2})[\/\-\.\s](20\d{2}|\d{2})\b'
     )
@@ -166,7 +130,6 @@ def process_pdf_precision_multipage(pdf_file, password=None):
             # --- STRATEGY 1: TABLE EXTRACTION ---
             tables = page.extract_tables()
             
-            # Detect fake merged single-row tables (common in HDFC)
             is_fake_merged_table = False
             if tables and len(tables) > 0:
                 tbl = tables[0]
@@ -175,20 +138,17 @@ def process_pdf_precision_multipage(pdf_file, password=None):
 
             if tables and not is_fake_merged_table:
                 for table in tables:
-                    if not table or len(table) < 1:
-                        continue
+                    if not table or len(table) < 1: continue
 
                     for raw_row in table:
-                        if not raw_row:
-                            continue
+                        if not raw_row: continue
 
+                        # Full multi-line narration inner join
                         row_cells = [" ".join([l.strip() for l in str(c).split('\n') if l.strip()]) if c is not None else "" for c in raw_row]
                         row_str = " ".join(row_cells).lower()
 
-                        if any(kw in row_str for kw in ignore_keywords):
-                            continue
+                        if any(kw in row_str for kw in ignore_keywords): continue
 
-                        # Header Row Detection
                         if any(k in row_str for k in ["withdrawal", "deposit", "debit", "credit", "balance"]) and not header_found_global:
                             for idx, c in enumerate(row_cells):
                                 c_low = c.lower()
@@ -201,33 +161,25 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                             header_found_global = True
                             continue
 
-                        if not header_found_global and page_idx == 0:
-                            continue
+                        if not header_found_global and page_idx == 0: continue
 
-                        # Filter Opening/Closing Balance rows
                         if any(b_kw in row_str for b_kw in balance_summary_keywords):
                             if "opening" in row_str or "b/f" in row_str:
-                                if bal_col != -1 and bal_col < len(row_cells):
-                                    opening_balance = clean_amount(row_cells[bal_col])
+                                if bal_col != -1 and bal_col < len(row_cells): opening_balance = clean_amount(row_cells[bal_col])
                                 if not opening_balance:
                                     amts = strict_amount_pattern.findall(row_str)
                                     if amts: opening_balance = float(amts[-1].replace(',', ''))
                                 if opening_balance: running_balance = opening_balance
                             elif "closing" in row_str or "c/f" in row_str:
-                                if bal_col != -1 and bal_col < len(row_cells):
-                                    closing_balance_detected = clean_amount(row_cells[bal_col])
+                                if bal_col != -1 and bal_col < len(row_cells): closing_balance_detected = clean_amount(row_cells[bal_col])
                             continue
 
-                        # Date Handling
                         cell_date = row_cells[date_col] if (date_col != -1 and date_col < len(row_cells)) else ""
                         d_match = date_pattern.search(cell_date) or date_pattern.search(row_str)
-                        if d_match:
-                            last_valid_date = d_match.group(0)
+                        if d_match: last_valid_date = d_match.group(0)
 
-                        if not last_valid_date:
-                            continue
+                        if not last_valid_date: continue
 
-                        # Amounts Extraction with Balance Exclusion
                         dr_amt = clean_amount(row_cells[dr_col]) if (dr_col != -1 and dr_col < len(row_cells)) else 0.0
                         cr_amt = clean_amount(row_cells[cr_col]) if (cr_col != -1 and cr_col < len(row_cells)) else 0.0
                         bal_amt = clean_amount(row_cells[bal_col]) if (bal_col != -1 and bal_col < len(row_cells)) else 0.0
@@ -244,21 +196,17 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                             tx_amount = dr_amt
                             if bal_amt > 0: running_balance = bal_amt; closing_balance_detected = bal_amt
                         else:
-                            # Fallback Scanner (EXCLUDES bal_col from picking balance as tx amount)
                             num_cells = []
                             for idx, cell in enumerate(row_cells):
-                                if idx == bal_col:
-                                    continue
+                                if idx == bal_col: continue
                                 a = clean_amount(cell)
                                 if a > 0 and ('.' in str(cell) or len(str(cell).strip()) > 3):
                                     num_cells.append((idx, a))
-                            
                             if len(num_cells) >= 1:
                                 tx_amount = num_cells[-1][1]
                                 vch_type = "Payment" if any(k in row_str.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
 
-                        if tx_amount == 0.0:
-                            continue
+                        if tx_amount == 0.0: continue
 
                         desc = row_cells[desc_col] if (desc_col != -1 and desc_col < len(row_cells)) else ""
                         ref = row_cells[ref_col] if (ref_col != -1 and ref_col < len(row_cells)) else ""
@@ -277,7 +225,7 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                             "Amount": float(tx_amount)
                         })
 
-            # --- STRATEGY 2: UNIVERSAL TEXT BLOCK EXTRACTION (Handles HDFC & Borderless PDFs) ---
+            # --- STRATEGY 2: UNIVERSAL TEXT BLOCK EXTRACTION (Full Multi-line Narration Engine) ---
             if not page_extracted_rows:
                 text = page.extract_text(layout=False)
                 if text:
@@ -288,8 +236,7 @@ def process_pdf_precision_multipage(pdf_file, password=None):
 
                     for line in lines:
                         line_low = line.lower()
-                        if any(kw in line_low for kw in ignore_keywords):
-                            continue
+                        if any(kw in line_low for kw in ignore_keywords): continue
 
                         if any(b_kw in line_low for b_kw in balance_summary_keywords):
                             if ("opening" in line_low or "b/f" in line_low) and opening_balance is None:
@@ -309,20 +256,17 @@ def process_pdf_precision_multipage(pdf_file, password=None):
                             is_new = True
 
                         if is_new:
-                            if current_block:
-                                tx_blocks.append(current_block)
+                            if current_block: tx_blocks.append(current_block)
                             current_block = {
                                 "date": d_match.group(0) if d_match else (current_block["date"] if current_block else last_valid_date),
                                 "lines": [line]
                             }
-                            if d_match:
-                                last_valid_date = d_match.group(0)
+                            if d_match: last_valid_date = d_match.group(0)
                         else:
                             if current_block:
                                 current_block["lines"].append(line)
 
-                    if current_block:
-                        tx_blocks.append(current_block)
+                    if current_block: tx_blocks.append(current_block)
 
                     for block in tx_blocks:
                         full_text = " ".join(block["lines"])
@@ -342,12 +286,9 @@ def process_pdf_precision_multipage(pdf_file, password=None):
 
                             if running_balance is not None:
                                 diff = round(curr_bal - running_balance, 2)
-                                if diff > 0.01:
-                                    vch_type = "Receipt"
-                                elif diff < -0.01:
-                                    vch_type = "Payment"
-                                else:
-                                    vch_type = "Payment" if any(k in full_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
+                                if diff > 0.01: vch_type = "Receipt"
+                                elif diff < -0.01: vch_type = "Payment"
+                                else: vch_type = "Payment" if any(k in full_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
                             else:
                                 vch_type = "Payment" if any(k in full_text.upper() for k in ["DR", "WITHDRAWAL", "DEBIT"]) else "Receipt"
 
@@ -393,10 +334,10 @@ def generate_balanced_tally_xml(rows, bank_ledger):
     ]
     
     for r in rows:
-        tally_date = r["Date_Tally"]
-        narration = str(r["Narration"]).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;').replace("'", '&apos;')
-        vch_type = r["VoucherType"]
-        amt = float(r["Amount"])
+        tally_date = r.get("Date_Tally", parse_tally_date(r.get("Date_Display", "")))
+        narration = str(r.get("Narration", "")).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;').replace("'", '&apos;')
+        vch_type = str(r.get("VoucherType", "Receipt"))
+        amt = float(r.get("Amount", 0.0))
         amt_str = f"{amt:.2f}"
         
         xml_lines.append('        <TALLYMESSAGE xmlns:UDF="TallyUDF">')
@@ -439,88 +380,170 @@ def generate_balanced_tally_xml(rows, bank_ledger):
     ])
     return "\n".join(xml_lines)
 
-# Execution
-if uploaded_file is not None:
-    with st.spinner("⌛ Extracting Statement Data with Precision Engine..."):
-        if bank_option == "Auto-Detect Bank Format":
-            bank_name, bank_class, is_scanned, status = detect_bank_and_type(uploaded_file, password=pdf_password)
-        else:
-            bank_name = bank_option
-            bank_class = "Class A"
-            is_scanned = False
-            status = "OK"
-        
-        if status == "ERROR_PASSWORD":
-            st.error("🔒 PDF is Password Protected! Please enter the correct password in the box above.")
-        else:
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.success(f"🏦 Selected/Detected Bank: **{bank_name}**")
-            with c2:
-                st.info(f"🏷️ Engine Category: **{bank_class}**")
-            with c3:
-                st.info("🖼️ Scanned OCR Check Completed" if is_scanned else "📄 Format: Digital Text PDF")
+# --- CREATING CLEAN TWO TABS FOR ZERO CONFUSION ---
+tab1, tab2 = st.tabs(["📄 PDF to Excel & XML (With Live Editor)", "📊 Excel to Tally XML (Direct Convertor)"])
 
-            rows, op_bal, cl_bal = process_pdf_precision_multipage(uploaded_file, password=pdf_password)
-        
-    if rows:
-        df_preview = pd.DataFrame(rows)
-        df_preview['Amount'] = pd.to_numeric(df_preview['Amount'], errors='coerce').fillna(0.0)
-        
-        st.markdown("---")
-        st.subheader("📊 Pre-Import Financial Audit Dashboard")
-        
-        receipts_df = df_preview[df_preview['VoucherType'] == 'Receipt']
-        payments_df = df_preview[df_preview['VoucherType'] == 'Payment']
-        
-        total_receipts = float(receipts_df['Amount'].sum()) if not receipts_df.empty else 0.0
-        total_payments = float(payments_df['Amount'].sum()) if not payments_df.empty else 0.0
-        total_count = len(df_preview)
-        
-        op_val = float(op_bal) if op_bal is not None else 0.0
-        calc_closing = op_val + total_receipts - total_payments
-        
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Opening Balance", f"₹ {op_val:,.2f}")
-        m2.metric("Total Extracted", f"{total_count} Vouchers")
-        m3.metric("Total Credit (+)", f"₹ {total_receipts:,.2f}")
-        m4.metric("Total Debit (-)", f"₹ {total_payments:,.2f}")
-        m5.metric("Calculated Closing", f"₹ {calc_closing:,.2f}")
-        
-        if cl_bal is not None:
-            if abs(calc_closing - float(cl_bal)) < 1.0:
-                st.success(f"✅ Closing Balance Perfectly Matched with Statement Closing Balance (₹ {float(cl_bal):,.2f})!")
+# ==================== TAB 1: PDF CONVERTER & EDITABLE PREVIEW ====================
+with tab1:
+    st.header("📄 Convert PDF Statement & Edit Vouchers")
+    
+    col_a, col_b = st.columns(2)
+    with col_a:
+        bank_option = st.selectbox(
+            "🏦 Select Bank Format / Engine:",
+            [
+                "Auto-Detect Bank Format",
+                "Kotak Mahindra Bank",
+                "ICICI Bank",
+                "HDFC Bank",
+                "State Bank of India (SBI)",
+                "Punjab National Bank (PNB)",
+                "Bank of Baroda (BOB)",
+                "Canara Bank",
+                "Union Bank of India",
+                "Axis Bank",
+                "Universal / General Bank"
+            ],
+            key="pdf_bank_opt"
+        )
+        tally_bank_ledger = st.text_input("🏦 Tally Bank Ledger Name:", value="Bank Account", key="pdf_ledger")
+    
+    with col_b:
+        pdf_password = st.text_input("🔑 PDF Password (If protected):", type="password", key="pdf_pass")
+        uploaded_file = st.file_uploader("📂 Upload PDF Bank Statement", type=["pdf"], key="pdf_file")
+
+    if uploaded_file is not None:
+        with st.spinner("⌛ Extracting Data with Full Narration Engine..."):
+            if bank_option == "Auto-Detect Bank Format":
+                bank_name, bank_class, is_scanned, status = detect_bank_and_type(uploaded_file, password=pdf_password)
             else:
-                st.warning(f"ℹ️ Statement Closing Balance detected: ₹ {float(cl_bal):,.2f}")
-        
-        st.markdown("---")
-        st.subheader("📋 Extracted Vouchers Preview")
-        st.dataframe(df_preview[["Date_Display", "VoucherType", "Amount", "Narration"]], use_container_width=True)
-        
-        col1, col2 = st.columns(2)
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_preview.to_excel(writer, index=False)
-        excel_data = output.getvalue()
-        
-        with col1:
-            st.download_button(
-                label="📥 Download Clean Excel File",
-                data=excel_data,
-                file_name="BuddyAI_Bank_Statement.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
+                bank_name = bank_option
+                bank_class = "Class A"
+                is_scanned = False
+                status = "OK"
+            
+            if status == "ERROR_PASSWORD":
+                st.error("🔒 PDF is Password Protected! Please enter the correct password.")
+            else:
+                rows, op_bal, cl_bal = process_pdf_full_narration_engine(uploaded_file, password=pdf_password)
+            
+        if rows:
+            df_extracted = pd.DataFrame(rows)
+            df_extracted['Amount'] = pd.to_numeric(df_extracted['Amount'], errors='coerce').fillna(0.0)
+            
+            st.markdown("---")
+            st.subheader("📋 Extracted Vouchers Preview (Editable)")
+            st.info("💡 Tip: Aap kisi bhi cell (Date, Amount, Narration, VoucherType) par double-click karke use screen par hi direct edit kar sakte hain!")
+            
+            # Interactive Data Editor
+            edited_df = st.data_editor(
+                df_extracted[["Date_Display", "VoucherType", "Amount", "Narration"]],
+                num_rows="dynamic",
+                use_container_width=True,
+                key="vouchers_editor"
             )
             
-        xml_data = generate_balanced_tally_xml(rows, tally_bank_ledger)
-        
-        with col2:
+            # Recalculate Dashboard based on Live Edited DataFrame
+            st.markdown("---")
+            st.subheader("📊 Live Financial Audit Dashboard")
+            
+            receipts_df = edited_df[edited_df['VoucherType'] == 'Receipt']
+            payments_df = edited_df[edited_df['VoucherType'] == 'Payment']
+            
+            total_receipts = float(receipts_df['Amount'].sum()) if not receipts_df.empty else 0.0
+            total_payments = float(payments_df['Amount'].sum()) if not payments_df.empty else 0.0
+            total_count = len(edited_df)
+            
+            op_val = float(op_bal) if op_bal is not None else 0.0
+            calc_closing = op_val + total_receipts - total_payments
+            
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("Opening Balance", f"₹ {op_val:,.2f}")
+            m2.metric("Total Extracted", f"{total_count} Vouchers")
+            m3.metric("Total Credit (+)", f"₹ {total_receipts:,.2f}")
+            m4.metric("Total Debit (-)", f"₹ {total_payments:,.2f}")
+            m5.metric("Calculated Closing", f"₹ {calc_closing:,.2f}")
+            
+            col1, col2 = st.columns(2)
+            
+            # Excel Download
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                edited_df.to_excel(writer, index=False)
+            excel_data = output.getvalue()
+            
+            with col1:
+                st.download_button(
+                    label="📥 Download Clean Excel File",
+                    data=excel_data,
+                    file_name="BuddyAI_Bank_Statement.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+                
+            # XML Download from Edited Data
+            edited_rows = edited_df.to_dict('records')
+            for r in edited_rows:
+                r["Date_Tally"] = parse_tally_date(r.get("Date_Display", ""))
+            
+            xml_data = generate_balanced_tally_xml(edited_rows, tally_bank_ledger)
+            
+            with col2:
+                st.download_button(
+                    label="📄 Download Validated Tally XML",
+                    data=xml_data,
+                    file_name="BuddyAI_Tally_Import.xml",
+                    mime="application/xml",
+                    use_container_width=True
+                )
+
+# ==================== TAB 2: EXCEL TO TALLY XML DIRECT CONVERTER ====================
+with tab2:
+    st.header("📊 Convert Standard Excel File directly to Tally XML")
+    st.write("Apni kisi bhi Excel/CSV file ko Tally Import XML mein convert karein.")
+    
+    col_x, col_y = st.columns(2)
+    with col_x:
+        excel_ledger_name = st.text_input("🏦 Tally Bank Ledger Name:", value="Bank Account", key="excel_tab_ledger")
+    with col_y:
+        uploaded_excel = st.file_uploader("📂 Upload Clean Excel / CSV File", type=["xlsx", "xls", "csv"], key="excel_tab_file")
+
+    if uploaded_excel is not None:
+        try:
+            if uploaded_excel.name.endswith('.csv'):
+                df_excel = pd.read_csv(uploaded_excel)
+            else:
+                df_excel = pd.read_excel(uploaded_excel)
+            
+            st.success(f"✅ Excel Loaded Successfully! Found {len(df_excel)} rows.")
+            st.dataframe(df_excel.head(10), use_container_width=True)
+            
+            excel_rows = []
+            for _, r in df_excel.iterrows():
+                row_dict = r.to_dict()
+                
+                # Column Name Normalization
+                d_val = row_dict.get("Date_Display") or row_dict.get("Date") or row_dict.get("date") or ""
+                v_type = row_dict.get("VoucherType") or row_dict.get("Type") or row_dict.get("vouchertype") or "Receipt"
+                amt_val = row_dict.get("Amount") or row_dict.get("amount") or 0.0
+                narr_val = row_dict.get("Narration") or row_dict.get("narration") or row_dict.get("Description") or "Bank Entry"
+                
+                excel_rows.append({
+                    "Date_Display": str(d_val),
+                    "Date_Tally": parse_tally_date(d_val),
+                    "VoucherType": str(v_type).capitalize(),
+                    "Amount": clean_amount(amt_val),
+                    "Narration": str(narr_val)
+                })
+            
+            excel_xml_output = generate_balanced_tally_xml(excel_rows, excel_ledger_name)
+            
             st.download_button(
-                label="📄 Download Validated Tally XML",
-                data=xml_data,
-                file_name="BuddyAI_Tally_Import.xml",
+                label="📄 Download Tally XML From Excel",
+                data=excel_xml_output,
+                file_name="BuddyAI_Excel_To_Tally.xml",
                 mime="application/xml",
                 use_container_width=True
             )
-    else:
-        st.warning("⚠️ No valid transactions extracted. Verify statement content or password.")
+        except Exception as e:
+            st.error(f"❌ Error reading Excel file: {str(e)}")
