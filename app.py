@@ -326,10 +326,10 @@ def process_pdf_full_narration_engine(pdf_file, password=None):
     return parsed_rows, opening_balance, closing_balance_detected
 
 def process_pdf_universal_standalone_engine(pdf_file, password=None):
-    """11zon-style Clean Bounding Box Parser with Strict Metadata Filtering & Balance Audit"""
+    """11zon-style Strict Bounding Box & Header/Footer Crop Engine for Tab 3"""
     date_pattern = re.compile(r'\b(0?[1-9]|[12][0-9]|3[01])[\/\-\.\s](0?[1-9]|1[0-2]|[A-Za-z]{3}|\d{1,2})[\/\-\.\s](20\d{2}|\d{2})\b')
     
-    ignore_phrases = [
+    metadata_block_keywords = [
         "account branch", "joint holders", "od limit", "cust id", "account no", 
         "a/c open date", "account status", "rtgs/neft ifsc", "branch code", 
         "account type", "statement of account", "page no", "closing balance includes", 
@@ -337,7 +337,8 @@ def process_pdf_universal_standalone_engine(pdf_file, password=None):
         "registered", "nomination", "bhera enclave", "delhi india", "swastik enterprises",
         "opening balance", "drcount", "crcount", "total deposit", "total withdrawal",
         "currency email", "godown no", "najafgarh road", "custid", "accountno",
-        "phoneno", "odlimit", "branchcode", "registered accounttype", "closingbalanceincludes"
+        "phoneno", "odlimit", "branchcode", "registered accounttype", "closingbalanceincludes",
+        "contents of this statement", "statement summary", "statementof"
     ]
 
     rows = []
@@ -350,7 +351,7 @@ def process_pdf_universal_standalone_engine(pdf_file, password=None):
             words = page.extract_words(x_tolerance=3, y_tolerance=3)
             if not words: continue
 
-            # Detect main table header line Y-coordinate
+            # Detect main table header Y-coordinate dynamically on EVERY page
             header_y = None
             for w in words:
                 w_low = w['text'].lower()
@@ -361,7 +362,7 @@ def process_pdf_universal_standalone_engine(pdf_file, password=None):
             # STRICT CUTOFF: Ignore all words above main table header line on EVERY page
             valid_words = []
             for w in words:
-                if header_y is not None and w['top'] < (header_y + 12):
+                if header_y is not None and w['top'] < (header_y - 2):
                     continue
                 valid_words.append(w)
 
@@ -379,7 +380,11 @@ def process_pdf_universal_standalone_engine(pdf_file, password=None):
                 line_text = " ".join([w['text'] for w in line_words]).strip()
                 line_text_low = line_text.lower()
 
-                if any(phrase in line_text_low for phrase in ignore_phrases):
+                # Ignore Table Headers & Metadata Rows completely
+                if any(k in line_text_low for k in ["chq/ref", "withdrawal amt", "deposit amt", "closing balance", "value dt"]):
+                    if not date_pattern.search(line_text): continue
+
+                if any(phrase in line_text_low for phrase in metadata_block_keywords):
                     continue
 
                 col_date, col_narr, col_ref, col_valdt, col_dr, col_cr, col_bal = [], [], [], [], [], [], []
@@ -402,16 +407,24 @@ def process_pdf_universal_standalone_engine(pdf_file, password=None):
                 str_cr = " ".join(col_cr).strip()
                 str_bal = " ".join(col_bal).strip()
 
+                # STRICT RULE: Date MUST be in the Date Column (x_rel < 0.12)
                 d_match = date_pattern.search(str_date)
                 dr_amt = clean_amount(str_dr)
                 cr_amt = clean_amount(str_cr)
                 bal_amt = clean_amount(str_bal)
 
-                if d_match or ((dr_amt > 0 or cr_amt > 0) and current_tx is not None):
+                is_new_tx = False
+                if d_match:
+                    is_new_tx = True
+                elif (dr_amt > 0 or cr_amt > 0) and current_tx is not None:
+                    is_new_tx = True
+
+                if is_new_tx:
                     if current_tx:
                         rows.append(current_tx)
 
-                    full_narr = f"{str_narr} {str_ref}".strip() if str_ref else str_narr
+                    narr_parts = [p for p in [str_narr, str_ref] if p]
+                    full_narr = " ".join(narr_parts).strip()
                     if not full_narr:
                         narr_words = [w['text'] for w in line_words if 0.12 <= (w['x0'] / page_width) < 0.63]
                         full_narr = " ".join(narr_words).strip() if narr_words else "Bank Entry"
@@ -430,9 +443,9 @@ def process_pdf_universal_standalone_engine(pdf_file, password=None):
                         closing_balance_detected = bal_amt
                 else:
                     if current_tx and line_text:
-                        narr_words = [w['text'] for w in line_words if (w['x0'] / page_width) < 0.63]
+                        narr_words = [w['text'] for w in line_words if 0.12 <= (w['x0'] / page_width) < 0.63]
                         add_txt = " ".join(narr_words).strip() if narr_words else line_text
-                        if add_txt and not any(k in add_txt.lower() for k in ["statement of account", "page "]):
+                        if add_txt and not any(k in add_txt.lower() for k in metadata_block_keywords):
                             current_tx["Narration"] = (current_tx["Narration"] + " " + add_txt).strip()
 
         if current_tx:
@@ -782,7 +795,7 @@ with tab3:
     
     col_t3_a, col_t3_b = st.columns(2)
     with col_t3_a:
-        st.info("⚙️ Engine: **X-Y Bounding Box Parser + Strict Header Filter (11zon Style)**")
+        st.info("⚙️ Engine: **X-Y Bounding Box Parser + Dynamic Header/Footer Crop (11zon Style)**")
     with col_t3_b:
         standalone_pass = st.text_input("🔑 PDF Password (If Protected):", type="password", key="tab3_pass")
         
