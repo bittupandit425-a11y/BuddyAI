@@ -1,4 +1,5 @@
 import streamlit as st
+from ai_assistant import show_ai_tab
 import pdfplumber
 import pandas as pd
 import re
@@ -468,8 +469,14 @@ def generate_balanced_tally_xml(rows, bank_ledger):
     ])
     return "\n".join(xml_lines)
 
-# --- CLEAN TWO TABS FOR ZERO CONFUSION ---
-tab1, tab2 = st.tabs(["📄 PDF to Excel & XML (With Live Editor)", "📊 Excel to Tally XML (Direct Convertor)"])
+# --- THREE TABS LAYOUT ---
+tab1, tab2, tab3 = st.tabs([
+    "📄 PDF to Excel & XML (With Live Editor)", 
+    "📊 Excel to Tally XML (Direct Convertor)",
+    "🤖 AI Assistant"
+])
+
+# ==================== TAB 1: PDF CONVERTER & EDITABLE PREVIEW ====================
 
 # ==================== TAB 1: PDF CONVERTER & EDITABLE PREVIEW ====================
 with tab1:
@@ -654,3 +661,6 @@ with tab2:
                 st.warning("⚠️ No valid transaction rows could be parsed from the Excel file.")
         except Exception as e:
             st.error(f"❌ Error reading Excel file: {str(e)}")
+
+with tab3:
+    show_ai_tab()
