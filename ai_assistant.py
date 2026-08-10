@@ -14,7 +14,22 @@ def show_ai_tab():
     if api_key:
         try:
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-2.5-flash")
+            
+            # Auto-detect working model available for this API key
+            working_model_name = None
+            try:
+                for m in genai.list_models():
+                    if 'generateContent' in m.supported_generation_methods:
+                        working_model_name = m.name
+                        if 'flash' in m.name:
+                            break
+            except Exception:
+                pass
+
+            if not working_model_name:
+                working_model_name = "models/gemini-1.5-flash"
+
+            model = genai.GenerativeModel(working_model_name)
 
             if "chat_messages" not in st.session_state:
                 st.session_state.chat_messages = [
@@ -36,7 +51,7 @@ def show_ai_tab():
                         system_prompt = (
                             "You are BuddyAI Assistant, an expert AI collaborator specializing in Tally Prime, "
                             "Indian Accounting rules, GST, bank statement reconciliation, and XML data imports. "
-                            "Answer helpfuly, clearly, and concisely in a friendly Hinglish/English mix."
+                            "Answer helpfully, clearly, and concisely in a friendly Hinglish/English mix."
                         )
                         full_prompt = f"{system_prompt}\n\nUser Question: {user_prompt}"
                         response = model.generate_content(full_prompt)
