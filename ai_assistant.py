@@ -14,22 +14,7 @@ def show_ai_tab():
     if api_key:
         try:
             genai.configure(api_key=api_key)
-            
-            # Auto-detect working model available for this API key
-            working_model_name = None
-            try:
-                for m in genai.list_models():
-                    if 'generateContent' in m.supported_generation_methods:
-                        working_model_name = m.name
-                        if 'flash' in m.name:
-                            break
-            except Exception:
-                pass
-
-            if not working_model_name:
-                working_model_name = "models/gemini-1.5-flash"
-
-            model = genai.GenerativeModel(working_model_name)
+            model = genai.GenerativeModel("gemini-1.5-flash")
 
             if "chat_messages" not in st.session_state:
                 st.session_state.chat_messages = [
@@ -61,4 +46,4 @@ def show_ai_tab():
         except Exception as e:
             st.error(f"❌ Gemini Connection Error: {str(e)}")
     else:
-        st.info("💡 Tip: Free Gemini API Key paane ke liye [Google AI Studio](https://aistudio.google.com/) par jayein aur yahan enter karein, ya fir `.streamlit/secrets.toml` mein `GEMINI_API_KEY` set karein.")
+        st.info("💡 Tip: Enter Gemini API Key above to activate AI chat, or configure GEMINI_API_KEY in Streamlit Secrets.")
