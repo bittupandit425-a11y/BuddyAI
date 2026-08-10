@@ -14,7 +14,6 @@ def show_ai_tab():
     if api_key:
         try:
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-1.5-flash")
 
             if "chat_messages" not in st.session_state:
                 st.session_state.chat_messages = [
@@ -39,9 +38,24 @@ def show_ai_tab():
                             "Answer helpfully, clearly, and concisely in a friendly Hinglish/English mix."
                         )
                         full_prompt = f"{system_prompt}\n\nUser Question: {user_prompt}"
-                        response = model.generate_content(full_prompt)
-                        st.write(response.text)
-                        st.session_state.chat_messages.append({"role": "model", "parts": [response.text]})
+                        
+                        response_text = None
+                        model_candidates = ["gemini-2.0-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-1.5-flash"]
+                        
+                        for m_name in model_candidates:
+                            try:
+                                model = genai.GenerativeModel(m_name)
+                                res = model.generate_content(full_prompt)
+                                response_text = res.text
+                                break
+                            except Exception:
+                                continue
+
+                        if response_text:
+                            st.write(response_text)
+                            st.session_state.chat_messages.append({"role": "model", "parts": [response_text]})
+                        else:
+                            st.error("❌ Unable to connect to Gemini API. Please check your API key.")
 
         except Exception as e:
             st.error(f"❌ Gemini Connection Error: {str(e)}")
