@@ -5,47 +5,82 @@ import pandas as pd
 import io
 import re
 
-def extract_table_and_create_excel(text):
-    """Markdown table ko parse karke clean 5-column Excel & CSV create karta hai"""
-    lines = [line.strip() for line in text.strip().split("\n") if line.strip().startswith("|") and line.strip().endswith("|")]
-    if len(lines) >= 2:
-        # Separator line (|---|---|) ko filter karna
-        clean_lines = [l for l in lines if not re.match(r'^\|(\s*:?-+:?\s*\|)+$', l)]
-        if len(clean_lines) >= 2:
-            data = []
-            for l in clean_lines:
-                row = [c.strip() for c in l.split("|")[1:-1]]
-                data.append(row)
-            try:
-                # Header row
-                raw_headers = data[0]
-                df = pd.DataFrame(data[1:], columns=raw_headers)
-                
-                # Column names standardize karna (Exact 5 columns)
-                target_cols = ['Date', 'Narration', 'Withdrawal', 'Deposit', 'Closing Balance']
-                if len(df.columns) == 5:
-                    df.columns = target_cols
-                
-                # Narration cell cleaning (new lines to single line space)
-                if 'Narration' in df.columns:
-                    df['Narration'] = df['Narration'].astype(str).str.replace(r'\s+', ' ', regex=True).str.strip()
+def clean_and_build_excel(table_text):
+    """Markdown table ko strictly 5 columns clean DataFrame aur Excel bytes mein convert karta hai"""
+    lines = [l.strip() for l in table_text.strip().split("\n") if l.strip().startswith("|") and l.strip().endswith("|")]
+    if len(lines) < 2:
+        return None, None
+    
+    # Filter markdown divider lines |---|---|
+    content_lines = [l for l in lines if not re.match(r'^\|(\s*:?-+:?\s*\|)+$', l)]
+    if len(content_lines) < 2:
+        return None, None
 
-                # Excel file generation
-                try:
-                    excel_buffer = io.BytesIO()
-                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                        df.to_excel(writer, index=False, sheet_name='Bank Statement')
-                    return df, excel_buffer.getvalue(), "xlsx"
-                except Exception:
-                    csv_bytes = df.to_csv(index=False).encode('utf-8-sig')
-                    return df, csv_bytes, "csv"
-            except Exception:
-                pass
-    return None, None, None
+    rows = []
+    for l in content_lines:
+        cells = [c.strip() for c in l.split("|")[1:-1]]
+        rows.append(cells)
+
+    try:
+        raw_df = pd.DataFrame(rows[1:], columns=rows[0])
+        clean_df = pd.DataFrame()
+
+        # 1. Date Column
+        date_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['date', 'dt', 'tareekh'])), raw_df.columns[0])
+        clean_df['Date'] = raw_df[date_col]
+
+        # 2. Narration Column (Combine remarks & ref into single cell without newlines)
+        narr_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['narration', 'remark', 'particular', 'description', 'detail'])), None)
+        ref_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['ref', 'chq', 'cheque', 'utr', 'txn'])), None)
+        
+        if narr_col and ref_col:
+            clean_df['Narration'] = raw_df[narr_col].astype(str) + " " + raw_df[ref_col].astype(str)
+        elif narr_col:
+            clean_df['Narration'] = raw_df[narr_col].astype(str)
+        elif len(raw_df.columns) > 1:
+            clean_df['Narration'] = raw_df[raw_df.columns[1]].astype(str)
+        else:
+            clean_df['Narration'] = ""
+
+        # Single line cleanup for multi-line narration
+        clean_df['Narration'] = clean_df['Narration'].astype(str).str.replace(r'[\r\n\t]+', ' ', regex=True).str.replace(r'\s+', ' ', regex=True).str.strip()
+
+        # 3. Withdrawal / Debit
+        dr_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['withdraw', 'debit', 'dr', 'out'])), None)
+        if dr_col:
+            clean_df['Withdrawal'] = raw_df[dr_col].astype(str).str.replace(',', '').str.replace('-', '').str.strip()
+        else:
+            clean_df['Withdrawal'] = ""
+
+        # 4. Deposit / Credit
+        cr_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['deposit', 'credit', 'cr', 'in'])), None)
+        if cr_col:
+            clean_df['Deposit'] = raw_df[cr_col].astype(str).str.replace(',', '').str.replace('-', '').str.strip()
+        else:
+            clean_df['Deposit'] = ""
+
+        # 5. Closing Balance
+        bal_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['balance', 'bal', 'closing'])), None)
+        if bal_col:
+            clean_df['Closing Balance'] = raw_df[bal_col].astype(str).str.replace(',', '').str.strip()
+        else:
+            clean_df['Closing Balance'] = ""
+
+        # Enforce exact 5 columns
+        clean_df = clean_df[['Date', 'Narration', 'Withdrawal', 'Deposit', 'Closing Balance']]
+
+        # Create Excel file
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+            clean_df.to_excel(writer, index=False, sheet_name='Bank Statement')
+        
+        return clean_df, excel_buffer.getvalue()
+    except Exception:
+        return None, None
 
 def show_ai_tab():
     st.header("🤖 BuddyAI Smart Assistant")
-    st.caption("Aapka Bank Statement to Clean Excel Converter — Sirf 5 Columns & No Header Junk!")
+    st.caption("PDF/Image Statement to Clean Excel Converter — 5 Columns & Ready for Tally XML!")
 
     # 1. API Key Setup
     api_key = None
@@ -58,9 +93,9 @@ def show_ai_tab():
         api_key = api_key.strip()
 
         # 2. File Uploader Section
-        with st.expander("📎 Attach Statement PDF / Screenshot / Invoice", expanded=True):
+        with st.expander("📎 Attach Bank Statement PDF / Screenshot / Invoice", expanded=True):
             uploaded_file = st.file_uploader(
-                "Upload Bank Statement PDF, Image ya Document:",
+                "Upload Statement File (PDF or Image):",
                 type=["pdf", "png", "jpg", "jpeg", "csv", "txt"],
                 key="chat_file_uploader"
             )
@@ -69,16 +104,16 @@ def show_ai_tab():
                 if uploaded_file.type.startswith("image/"):
                     st.image(uploaded_file, caption="Preview", width=220)
 
-        # 3. Chat History Setup
+        # 3. Chat Session State Setup
         if "chat_messages" not in st.session_state:
             st.session_state.chat_messages = [
                 {
                     "role": "model",
-                    "text": "Namaste! Main BuddyAI Assistant hoon. Koi bhi **Bank Statement PDF ya Screenshot attach karein**, main bina kisi account header junk ke seedhe **5 Columns (Date, Narration, Withdrawal, Deposit, Closing Balance)** wali clean Excel file bana kar dunga."
+                    "text": "Namaste! Main BuddyAI Assistant hoon. Koi bhi **Bank Statement PDF ya Screenshot attach karein**, main seedhe **5 Columns (Date, Narration, Withdrawal, Deposit, Closing Balance)** wali downloadable Excel sheet bana dunga."
                 }
             ]
 
-        # Purane messages aur download buttons display karna
+        # Purane messages aur live download buttons display karna
         for idx, msg in enumerate(st.session_state.chat_messages):
             role = msg.get("role", "model")
             role_icon = "🤖" if role == "model" else "👤"
@@ -89,21 +124,19 @@ def show_ai_tab():
                 if msg.get("file_name"):
                     st.caption(f"📎 Attached: *{msg['file_name']}*")
                 
-                # Agar table extract hui hai toh download button
                 if role == "model":
-                    df, file_data, ext = extract_table_and_create_excel(display_text)
-                    if file_data is not None:
-                        mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if ext == "xlsx" else "text/csv"
+                    df, excel_bytes = clean_and_build_excel(display_text)
+                    if excel_bytes is not None:
                         st.download_button(
-                            label=f"📥 Download Clean Excel File (.{ext.upper()})",
-                            data=file_data,
-                            file_name=f"Bank_Statement_Clean_{idx}.{ext}",
-                            mime=mime_type,
-                            key=f"download_btn_hist_{idx}"
+                            label="📥 Download Clean Excel File (.XLSX)",
+                            data=excel_bytes,
+                            file_name=f"Bank_Statement_{idx}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"dl_btn_{idx}"
                         )
 
         # 4. User Chat Input
-        if user_prompt := st.chat_input("Statement se Excel data extract karne ke liye likhein..."):
+        if user_prompt := st.chat_input("Statement se Excel sheet banane ke liye enter karein..."):
             attached_name = uploaded_file.name if uploaded_file else None
             st.session_state.chat_messages.append({"role": "user", "text": user_prompt, "file_name": attached_name})
             
@@ -113,17 +146,16 @@ def show_ai_tab():
                     st.caption(f"📎 Attached: *{attached_name}*")
 
             with st.chat_message("model", avatar="🤖"):
-                with st.spinner("Extracting transactions and cleaning narration..."):
+                with st.spinner("Extracting strictly 5 columns & generating Excel file..."):
                     system_prompt = (
-                        "You are an expert Bank Statement Parser and Excel Extraction Engine.\n"
-                        "STRICT EXTRACTION RULES:\n"
-                        "1. DO NOT include any account holder name, account number, bank address, IFSC, or summary cards before/after the table.\n"
-                        "2. Output ONLY a clean Markdown Table.\n"
-                        "3. The Markdown Table MUST strictly contain ONLY these 5 columns in exact order:\n"
+                        "You are an automated Bank Statement Parser.\n"
+                        "STRICT RULES:\n"
+                        "1. Output ONLY a clean Markdown Table without any greeting, intro, outro, summary, or account holder info.\n"
+                        "2. Table must start directly from Row 1 with EXACTLY these 5 columns:\n"
                         "| Date | Narration | Withdrawal | Deposit | Closing Balance |\n"
-                        "4. Multi-line narration/remarks MUST be combined into a SINGLE line per transaction (replace internal newlines/breaks with a single space).\n"
-                        "5. Row 1 of the output MUST be the table header, immediately followed by the transaction rows.\n"
-                        "6. Clean numbers only: keep numeric values without currency symbols, empty withdrawals/deposits as empty or 0.00.\n"
+                        "3. DO NOT create columns like 'Ref No', 'Cheque No', or 'Txn ID'. If reference numbers exist, append them inside the 'Narration' column text.\n"
+                        "4. Narration MUST be on a single continuous line per row.\n"
+                        "5. Do not include currency symbols (₹, Rs, $). Leave empty withdrawals/deposits blank."
                     )
                     full_prompt = f"{system_prompt}\n\nUser Request: {user_prompt}"
 
@@ -142,7 +174,7 @@ def show_ai_tab():
                     parts.append({"text": full_prompt})
                     payload = {"contents": [{"parts": parts}]}
 
-                    available_models = ["models/gemini-2.5-flash", "models/gemini-1.5-flash", "models/gemini-1.5-pro"]
+                    available_models = ["models/gemini-2.5-flash", "models/gemini-1.5-flash", "models/gemini-pro"]
                     try:
                         models_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
                         models_res = requests.get(models_url, timeout=10)
@@ -180,16 +212,15 @@ def show_ai_tab():
                         st.write(reply_text)
                         st.session_state.chat_messages.append({"role": "model", "text": reply_text})
                         
-                        # Clean Excel Download Button
-                        df, file_data, ext = extract_table_and_create_excel(reply_text)
-                        if file_data is not None:
-                            mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if ext == "xlsx" else "text/csv"
+                        # Generate Download Button Live
+                        df, excel_bytes = clean_and_build_excel(reply_text)
+                        if excel_bytes is not None:
                             st.download_button(
-                                label=f"📥 Download Clean Excel File (.{ext.upper()})",
-                                data=file_data,
-                                file_name=f"Clean_Bank_Statement.{ext}",
-                                mime=mime_type,
-                                key=f"download_btn_live_{len(st.session_state.chat_messages)}"
+                                label="📥 Download Clean Excel File (.XLSX)",
+                                data=excel_bytes,
+                                file_name="Bank_Statement_Clean.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key=f"dl_btn_live_{len(st.session_state.chat_messages)}"
                             )
                     else:
                         st.error(f"❌ Error generating response: {last_error}")
