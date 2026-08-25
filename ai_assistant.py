@@ -21,13 +21,11 @@ def show_ai_tab():
                 {"role": "model", "parts": ["Namaste! Main BuddyAI Assistant hoon. Tally import, GST, accounting entries, ya bank statement reconciliation se juda koi bhi sawal poochhiye!"]}
             ]
 
-        # Purane messages screen par dikhana
         for msg in st.session_state.chat_messages:
             role_icon = "🤖" if msg["role"] == "model" else "👤"
             with st.chat_message(msg["role"], avatar=role_icon):
                 st.write(msg["parts"][0])
 
-        # User chat input
         if user_prompt := st.chat_input("Ask anything about Tally, Accounting, or BuddyAI..."):
             st.session_state.chat_messages.append({"role": "user", "parts": [user_prompt]})
             with st.chat_message("user", avatar="👤"):
@@ -41,29 +39,42 @@ def show_ai_tab():
                         "Answer helpfully, clearly, and concisely in a friendly Hinglish/English mix."
                     )
                     full_prompt = f"{system_prompt}\n\nUser Question: {user_prompt}"
-                    
-                    headers = {
-                        "x-goog-api-key": api_key,
-                        "Content-Type": "application/json"
-                    }
+
+                    # 1. Available models ko dynamically fetch karna
+                    available_models = []
+                    try:
+                        models_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+                        models_res = requests.get(models_url, timeout=10)
+                        if models_res.status_code == 200:
+                            models_data = models_res.json().get("models", [])
+                            for m in models_data:
+                                if "generateContent" in m.get("supportedGenerationMethods", []):
+                                    available_models.append(m.get("name"))
+                    except Exception:
+                        pass
+
+                    if not available_models:
+                        available_models = ["models/gemini-2.5-flash", "models/gemini-1.5-flash", "models/gemini-pro"]
+
+                    available_models.sort(key=lambda x: ("flash" not in x, x))
+
                     payload = {
                         "contents": [
                             {
-                                "parts": [
-                                    {"text": full_prompt}
-                                ]
+                                "parts": [{"text": full_prompt}]
                             }
                         ]
                     }
 
-                    models_to_try = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"]
                     reply_text = None
                     last_error = ""
 
-                    for m_name in models_to_try:
-                        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent"
+                    # 2. Working model se direct response lena
+                    for model_name in available_models:
+                        clean_name = model_name if model_name.startswith("models/") else f"models/{model_name}"
+                        url = f"https://generativelanguage.googleapis.com/v1beta/{clean_name}:generateContent?key={api_key}"
                         try:
-                            res = requests.post(url, headers=headers, json=payload, timeout=30)
+                            res = requests.post(url, json=payload, timeout=30)
                             if res.status_code == 200:
                                 data = res.json()
                                 candidates = data.get("candidates", [])
@@ -84,4 +95,4 @@ def show_ai_tab():
                     else:
                         st.error(f"❌ Connection Error: {last_error}")
     else:
-        st.info("💡 Tip: AI chat start karne ke liye upar apni Gemini API Key daalein ya Streamlit Cloud Secrets mein `GEMINI_API_KEY` set karein.")
+        st.info("💡 Tip: AI chat start karne ke liye upar apni Gemini API Key daalein ya Streamlit Cloud Secrets mein GEMINI_API_KEY set karein.")
