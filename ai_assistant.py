@@ -28,21 +28,28 @@ def show_ai_tab():
                 if uploaded_file.type.startswith("image/"):
                     st.image(uploaded_file, caption="Attached Image Preview", width=250)
 
-        # 3. Chat History Setup
+        # 3. Chat History Setup (Safe fallback)
         if "chat_messages" not in st.session_state:
             st.session_state.chat_messages = [
                 {
                     "role": "model",
-                    "text": "Namaste! Main BuddyAI Assistant hoon. Aap mujhe text ke alawa **PDF Statement, Invoice, ya Error Screenshot** bhi bhej sakte hain. Main unhe analyze karke Tally XML ya Excel data nikal kar de sakta hoon!"
+                    "text": "Namaste! Main BuddyAI Assistant hoon. Aap mujhe text ke alawa PDF Statement, Invoice, ya Error Screenshot bhi bhej sakte hain."
                 }
             ]
 
-        # Purane messages display karna
+        # Purane messages safe display karna
         for msg in st.session_state.chat_messages:
-            role_icon = "🤖" if msg["role"] == "model" else "👤"
-            with st.chat_message(msg["role"], avatar=role_icon):
-                st.write(msg["text"])
-                if "file_name" in msg and msg["file_name"]:
+            role = msg.get("role", "model")
+            role_icon = "🤖" if role == "model" else "👤"
+            
+            # Legacy aur new format dono support
+            display_text = msg.get("text")
+            if not display_text and "parts" in msg and msg["parts"]:
+                display_text = msg["parts"][0]
+            
+            with st.chat_message(role, avatar=role_icon):
+                st.write(display_text or "")
+                if msg.get("file_name"):
                     st.caption(f"📎 Attached: *{msg['file_name']}*")
 
         # 4. User Input Box
@@ -63,11 +70,10 @@ def show_ai_tab():
                         "When analyzing images/PDFs, extract table structures, dates, debits, credits, and ledger names accurately. "
                         "Answer clearly, helpfully, and concisely in a friendly Hinglish/English mix."
                     )
-                    full_prompt = f"{system_prompt}\n\nUser Request: {user_prompt}"
+                    full_prompt = f"{system_prompt}\n\nUser Question: {user_prompt}"
 
-                    # Multimodal Payload create karna
+                    # Multimodal Payload
                     parts = []
-                    
                     if uploaded_file is not None:
                         file_bytes = uploaded_file.getvalue()
                         b64_data = base64.b64encode(file_bytes).decode('utf-8')
@@ -87,7 +93,6 @@ def show_ai_tab():
                         ]
                     }
 
-                    # Available Models List
                     available_models = []
                     try:
                         models_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
@@ -132,4 +137,4 @@ def show_ai_tab():
                     else:
                         st.error(f"❌ Connection Error: {last_error}")
     else:
-        st.info("💡 Tip: AI Assistant activate karne ke liye upar apni Gemini API Key daalein ya Streamlit Cloud Secrets mein `GEMINI_API_KEY` set karein.")
+        st.info("💡 Tip: AI Assistant activate karne ke liye upar apni Gemini API Key daalein ya Streamlit Cloud Secrets mein GEMINI_API_KEY set karein.")
