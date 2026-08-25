@@ -1,12 +1,53 @@
 import streamlit as st
 import requests
 import base64
+import pandas as pd
+import io
+import re
+
+def extract_table_and_create_excel(text):
+    """Markdown table ko parse karke clean 5-column Excel & CSV create karta hai"""
+    lines = [line.strip() for line in text.strip().split("\n") if line.strip().startswith("|") and line.strip().endswith("|")]
+    if len(lines) >= 2:
+        # Separator line (|---|---|) ko filter karna
+        clean_lines = [l for l in lines if not re.match(r'^\|(\s*:?-+:?\s*\|)+$', l)]
+        if len(clean_lines) >= 2:
+            data = []
+            for l in clean_lines:
+                row = [c.strip() for c in l.split("|")[1:-1]]
+                data.append(row)
+            try:
+                # Header row
+                raw_headers = data[0]
+                df = pd.DataFrame(data[1:], columns=raw_headers)
+                
+                # Column names standardize karna (Exact 5 columns)
+                target_cols = ['Date', 'Narration', 'Withdrawal', 'Deposit', 'Closing Balance']
+                if len(df.columns) == 5:
+                    df.columns = target_cols
+                
+                # Narration cell cleaning (new lines to single line space)
+                if 'Narration' in df.columns:
+                    df['Narration'] = df['Narration'].astype(str).str.replace(r'\s+', ' ', regex=True).str.strip()
+
+                # Excel file generation
+                try:
+                    excel_buffer = io.BytesIO()
+                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                        df.to_excel(writer, index=False, sheet_name='Bank Statement')
+                    return df, excel_buffer.getvalue(), "xlsx"
+                except Exception:
+                    csv_bytes = df.to_csv(index=False).encode('utf-8-sig')
+                    return df, csv_bytes, "csv"
+            except Exception:
+                pass
+    return None, None, None
 
 def show_ai_tab():
     st.header("🤖 BuddyAI Smart Assistant")
-    st.caption("Aapka Multimodal AI Partner — PDF, Screenshots, Tally Entries & Bank Data Analyze karein!")
+    st.caption("Aapka Bank Statement to Clean Excel Converter — Sirf 5 Columns & No Header Junk!")
 
-    # 1. API Key fetch karna
+    # 1. API Key Setup
     api_key = None
     if "GEMINI_API_KEY" in st.secrets and st.secrets["GEMINI_API_KEY"]:
         api_key = str(st.secrets["GEMINI_API_KEY"]).strip()
@@ -16,44 +57,53 @@ def show_ai_tab():
     if api_key:
         api_key = api_key.strip()
 
-        # 2. File / Image / PDF Attachment Section (+ Option)
-        with st.expander("📎 Attach File / Screenshot / PDF (Optional)", expanded=False):
+        # 2. File Uploader Section
+        with st.expander("📎 Attach Statement PDF / Screenshot / Invoice", expanded=True):
             uploaded_file = st.file_uploader(
-                "Upload Bank Statement PDF, Bill/Invoice, ya Error Screenshot:",
+                "Upload Bank Statement PDF, Image ya Document:",
                 type=["pdf", "png", "jpg", "jpeg", "csv", "txt"],
                 key="chat_file_uploader"
             )
             if uploaded_file:
-                st.success(f"✅ Attached: **{uploaded_file.name}** ({uploaded_file.type})")
+                st.success(f"✅ Selected: **{uploaded_file.name}**")
                 if uploaded_file.type.startswith("image/"):
-                    st.image(uploaded_file, caption="Attached Image Preview", width=250)
+                    st.image(uploaded_file, caption="Preview", width=220)
 
-        # 3. Chat History Setup (Safe fallback)
+        # 3. Chat History Setup
         if "chat_messages" not in st.session_state:
             st.session_state.chat_messages = [
                 {
                     "role": "model",
-                    "text": "Namaste! Main BuddyAI Assistant hoon. Aap mujhe text ke alawa PDF Statement, Invoice, ya Error Screenshot bhi bhej sakte hain."
+                    "text": "Namaste! Main BuddyAI Assistant hoon. Koi bhi **Bank Statement PDF ya Screenshot attach karein**, main bina kisi account header junk ke seedhe **5 Columns (Date, Narration, Withdrawal, Deposit, Closing Balance)** wali clean Excel file bana kar dunga."
                 }
             ]
 
-        # Purane messages safe display karna
-        for msg in st.session_state.chat_messages:
+        # Purane messages aur download buttons display karna
+        for idx, msg in enumerate(st.session_state.chat_messages):
             role = msg.get("role", "model")
             role_icon = "🤖" if role == "model" else "👤"
-            
-            # Legacy aur new format dono support
-            display_text = msg.get("text")
-            if not display_text and "parts" in msg and msg["parts"]:
-                display_text = msg["parts"][0]
+            display_text = msg.get("text") or (msg.get("parts")[0] if msg.get("parts") else "")
             
             with st.chat_message(role, avatar=role_icon):
-                st.write(display_text or "")
+                st.write(display_text)
                 if msg.get("file_name"):
                     st.caption(f"📎 Attached: *{msg['file_name']}*")
+                
+                # Agar table extract hui hai toh download button
+                if role == "model":
+                    df, file_data, ext = extract_table_and_create_excel(display_text)
+                    if file_data is not None:
+                        mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if ext == "xlsx" else "text/csv"
+                        st.download_button(
+                            label=f"📥 Download Clean Excel File (.{ext.upper()})",
+                            data=file_data,
+                            file_name=f"Bank_Statement_Clean_{idx}.{ext}",
+                            mime=mime_type,
+                            key=f"download_btn_hist_{idx}"
+                        )
 
-        # 4. User Input Box
-        if user_prompt := st.chat_input("Ask a question, or explain what to extract from the attached file..."):
+        # 4. User Chat Input
+        if user_prompt := st.chat_input("Statement se Excel data extract karne ke liye likhein..."):
             attached_name = uploaded_file.name if uploaded_file else None
             st.session_state.chat_messages.append({"role": "user", "text": user_prompt, "file_name": attached_name})
             
@@ -63,16 +113,20 @@ def show_ai_tab():
                     st.caption(f"📎 Attached: *{attached_name}*")
 
             with st.chat_message("model", avatar="🤖"):
-                with st.spinner("AI analyzing document & generating response..."):
+                with st.spinner("Extracting transactions and cleaning narration..."):
                     system_prompt = (
-                        "You are BuddyAI Assistant, an advanced multimodal AI specializing in Indian Accounting, "
-                        "Tally Prime, Bank Statement Reconciliation, Invoice parsing, and Error debugging. "
-                        "When analyzing images/PDFs, extract table structures, dates, debits, credits, and ledger names accurately. "
-                        "Answer clearly, helpfully, and concisely in a friendly Hinglish/English mix."
+                        "You are an expert Bank Statement Parser and Excel Extraction Engine.\n"
+                        "STRICT EXTRACTION RULES:\n"
+                        "1. DO NOT include any account holder name, account number, bank address, IFSC, or summary cards before/after the table.\n"
+                        "2. Output ONLY a clean Markdown Table.\n"
+                        "3. The Markdown Table MUST strictly contain ONLY these 5 columns in exact order:\n"
+                        "| Date | Narration | Withdrawal | Deposit | Closing Balance |\n"
+                        "4. Multi-line narration/remarks MUST be combined into a SINGLE line per transaction (replace internal newlines/breaks with a single space).\n"
+                        "5. Row 1 of the output MUST be the table header, immediately followed by the transaction rows.\n"
+                        "6. Clean numbers only: keep numeric values without currency symbols, empty withdrawals/deposits as empty or 0.00.\n"
                     )
-                    full_prompt = f"{system_prompt}\n\nUser Question: {user_prompt}"
+                    full_prompt = f"{system_prompt}\n\nUser Request: {user_prompt}"
 
-                    # Multimodal Payload
                     parts = []
                     if uploaded_file is not None:
                         file_bytes = uploaded_file.getvalue()
@@ -86,29 +140,20 @@ def show_ai_tab():
                         })
                     
                     parts.append({"text": full_prompt})
+                    payload = {"contents": [{"parts": parts}]}
 
-                    payload = {
-                        "contents": [
-                            {"parts": parts}
-                        ]
-                    }
-
-                    available_models = []
+                    available_models = ["models/gemini-2.5-flash", "models/gemini-1.5-flash", "models/gemini-1.5-pro"]
                     try:
                         models_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
                         models_res = requests.get(models_url, timeout=10)
                         if models_res.status_code == 200:
-                            for m in models_res.json().get("models", []):
-                                if "generateContent" in m.get("supportedGenerationMethods", []):
-                                    available_models.append(m.get("name"))
+                            dyn_models = [m.get("name") for m in models_res.json().get("models", []) if "generateContent" in m.get("supportedGenerationMethods", [])]
+                            if dyn_models:
+                                available_models = dyn_models
                     except Exception:
                         pass
 
-                    if not available_models:
-                        available_models = ["models/gemini-2.5-flash", "models/gemini-1.5-flash", "models/gemini-1.5-pro"]
-
                     available_models.sort(key=lambda x: ("flash" not in x, x))
-
                     reply_text = None
                     last_error = ""
 
@@ -116,7 +161,7 @@ def show_ai_tab():
                         clean_name = model_name if model_name.startswith("models/") else f"models/{model_name}"
                         url = f"https://generativelanguage.googleapis.com/v1beta/{clean_name}:generateContent?key={api_key}"
                         try:
-                            res = requests.post(url, json=payload, timeout=60)
+                            res = requests.post(url, json=payload, timeout=90)
                             if res.status_code == 200:
                                 data = res.json()
                                 candidates = data.get("candidates", [])
@@ -134,7 +179,19 @@ def show_ai_tab():
                     if reply_text:
                         st.write(reply_text)
                         st.session_state.chat_messages.append({"role": "model", "text": reply_text})
+                        
+                        # Clean Excel Download Button
+                        df, file_data, ext = extract_table_and_create_excel(reply_text)
+                        if file_data is not None:
+                            mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if ext == "xlsx" else "text/csv"
+                            st.download_button(
+                                label=f"📥 Download Clean Excel File (.{ext.upper()})",
+                                data=file_data,
+                                file_name=f"Clean_Bank_Statement.{ext}",
+                                mime=mime_type,
+                                key=f"download_btn_live_{len(st.session_state.chat_messages)}"
+                            )
                     else:
-                        st.error(f"❌ Connection Error: {last_error}")
+                        st.error(f"❌ Error generating response: {last_error}")
     else:
-        st.info("💡 Tip: AI Assistant activate karne ke liye upar apni Gemini API Key daalein ya Streamlit Cloud Secrets mein GEMINI_API_KEY set karein.")
+        st.info("💡 Tip: AI Assistant activate karne ke liye Streamlit Cloud Secrets mein `GEMINI_API_KEY` configure karein.")
