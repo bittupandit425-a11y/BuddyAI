@@ -1,11 +1,12 @@
 import streamlit as st
 import requests
+import base64
 
 def show_ai_tab():
-    st.header("🤖 BuddyAI Assistant")
-    st.caption("Aapka Smart AI Partner — Tally Prime, Accounting Entries & Reconciliation ke liye!")
+    st.header("🤖 BuddyAI Smart Assistant")
+    st.caption("Aapka Multimodal AI Partner — PDF, Screenshots, Tally Entries & Bank Data Analyze karein!")
 
-    # Secrets ya User Input se API Key lena
+    # 1. API Key fetch karna
     api_key = None
     if "GEMINI_API_KEY" in st.secrets and st.secrets["GEMINI_API_KEY"]:
         api_key = str(st.secrets["GEMINI_API_KEY"]).strip()
@@ -15,73 +16,109 @@ def show_ai_tab():
     if api_key:
         api_key = api_key.strip()
 
-        # Chat history maintain rakhna
+        # 2. File / Image / PDF Attachment Section (+ Option)
+        with st.expander("📎 Attach File / Screenshot / PDF (Optional)", expanded=False):
+            uploaded_file = st.file_uploader(
+                "Upload Bank Statement PDF, Bill/Invoice, ya Error Screenshot:",
+                type=["pdf", "png", "jpg", "jpeg", "csv", "txt"],
+                key="chat_file_uploader"
+            )
+            if uploaded_file:
+                st.success(f"✅ Attached: **{uploaded_file.name}** ({uploaded_file.type})")
+                if uploaded_file.type.startswith("image/"):
+                    st.image(uploaded_file, caption="Attached Image Preview", width=250)
+
+        # 3. Chat History Setup
         if "chat_messages" not in st.session_state:
             st.session_state.chat_messages = [
-                {"role": "model", "parts": ["Namaste! Main BuddyAI Assistant hoon. Tally import, GST, accounting entries, ya bank statement reconciliation se juda koi bhi sawal poochhiye!"]}
+                {
+                    "role": "model",
+                    "text": "Namaste! Main BuddyAI Assistant hoon. Aap mujhe text ke alawa **PDF Statement, Invoice, ya Error Screenshot** bhi bhej sakte hain. Main unhe analyze karke Tally XML ya Excel data nikal kar de sakta hoon!"
+                }
             ]
 
+        # Purane messages display karna
         for msg in st.session_state.chat_messages:
             role_icon = "🤖" if msg["role"] == "model" else "👤"
             with st.chat_message(msg["role"], avatar=role_icon):
-                st.write(msg["parts"][0])
+                st.write(msg["text"])
+                if "file_name" in msg and msg["file_name"]:
+                    st.caption(f"📎 Attached: *{msg['file_name']}*")
 
-        if user_prompt := st.chat_input("Ask anything about Tally, Accounting, or BuddyAI..."):
-            st.session_state.chat_messages.append({"role": "user", "parts": [user_prompt]})
+        # 4. User Input Box
+        if user_prompt := st.chat_input("Ask a question, or explain what to extract from the attached file..."):
+            attached_name = uploaded_file.name if uploaded_file else None
+            st.session_state.chat_messages.append({"role": "user", "text": user_prompt, "file_name": attached_name})
+            
             with st.chat_message("user", avatar="👤"):
                 st.write(user_prompt)
+                if attached_name:
+                    st.caption(f"📎 Attached: *{attached_name}*")
 
             with st.chat_message("model", avatar="🤖"):
-                with st.spinner("Analyzing..."):
+                with st.spinner("AI analyzing document & generating response..."):
                     system_prompt = (
-                        "You are BuddyAI Assistant, an expert AI collaborator specializing in Tally Prime, "
-                        "Indian Accounting rules, GST, bank statement reconciliation, and XML data imports. "
-                        "Answer helpfully, clearly, and concisely in a friendly Hinglish/English mix."
+                        "You are BuddyAI Assistant, an advanced multimodal AI specializing in Indian Accounting, "
+                        "Tally Prime, Bank Statement Reconciliation, Invoice parsing, and Error debugging. "
+                        "When analyzing images/PDFs, extract table structures, dates, debits, credits, and ledger names accurately. "
+                        "Answer clearly, helpfully, and concisely in a friendly Hinglish/English mix."
                     )
-                    full_prompt = f"{system_prompt}\n\nUser Question: {user_prompt}"
+                    full_prompt = f"{system_prompt}\n\nUser Request: {user_prompt}"
 
-                    # 1. Available models ko dynamically fetch karna
+                    # Multimodal Payload create karna
+                    parts = []
+                    
+                    if uploaded_file is not None:
+                        file_bytes = uploaded_file.getvalue()
+                        b64_data = base64.b64encode(file_bytes).decode('utf-8')
+                        mime_type = uploaded_file.type or "application/octet-stream"
+                        parts.append({
+                            "inlineData": {
+                                "mimeType": mime_type,
+                                "data": b64_data
+                            }
+                        })
+                    
+                    parts.append({"text": full_prompt})
+
+                    payload = {
+                        "contents": [
+                            {"parts": parts}
+                        ]
+                    }
+
+                    # Available Models List
                     available_models = []
                     try:
                         models_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
                         models_res = requests.get(models_url, timeout=10)
                         if models_res.status_code == 200:
-                            models_data = models_res.json().get("models", [])
-                            for m in models_data:
+                            for m in models_res.json().get("models", []):
                                 if "generateContent" in m.get("supportedGenerationMethods", []):
                                     available_models.append(m.get("name"))
                     except Exception:
                         pass
 
                     if not available_models:
-                        available_models = ["models/gemini-2.5-flash", "models/gemini-1.5-flash", "models/gemini-pro"]
+                        available_models = ["models/gemini-2.5-flash", "models/gemini-1.5-flash", "models/gemini-1.5-pro"]
 
                     available_models.sort(key=lambda x: ("flash" not in x, x))
-
-                    payload = {
-                        "contents": [
-                            {
-                                "parts": [{"text": full_prompt}]
-                            }
-                        ]
-                    }
 
                     reply_text = None
                     last_error = ""
 
-                    # 2. Working model se direct response lena
                     for model_name in available_models:
                         clean_name = model_name if model_name.startswith("models/") else f"models/{model_name}"
                         url = f"https://generativelanguage.googleapis.com/v1beta/{clean_name}:generateContent?key={api_key}"
                         try:
-                            res = requests.post(url, json=payload, timeout=30)
+                            res = requests.post(url, json=payload, timeout=60)
                             if res.status_code == 200:
                                 data = res.json()
                                 candidates = data.get("candidates", [])
                                 if candidates:
-                                    parts = candidates[0].get("content", {}).get("parts", [])
-                                    if parts:
-                                        reply_text = parts[0].get("text", "")
+                                    res_parts = candidates[0].get("content", {}).get("parts", [])
+                                    if res_parts:
+                                        reply_text = res_parts[0].get("text", "")
                                         break
                             else:
                                 last_error = f"Status {res.status_code}: {res.text}"
@@ -91,8 +128,8 @@ def show_ai_tab():
 
                     if reply_text:
                         st.write(reply_text)
-                        st.session_state.chat_messages.append({"role": "model", "parts": [reply_text]})
+                        st.session_state.chat_messages.append({"role": "model", "text": reply_text})
                     else:
                         st.error(f"❌ Connection Error: {last_error}")
     else:
-        st.info("💡 Tip: AI chat start karne ke liye upar apni Gemini API Key daalein ya Streamlit Cloud Secrets mein GEMINI_API_KEY set karein.")
+        st.info("💡 Tip: AI Assistant activate karne ke liye upar apni Gemini API Key daalein ya Streamlit Cloud Secrets mein `GEMINI_API_KEY` set karein.")
