@@ -6,7 +6,7 @@ import io
 import re
 
 def to_clean_float(val):
-    """String amount ko safe float number mein convert karta hai"""
+    """String amount ko safe numeric float mein convert karta hai"""
     if pd.isna(val):
         return 0.0
     s = str(val).replace(',', '').replace('₹', '').replace('Rs.', '').replace(' ', '').strip()
@@ -17,18 +17,14 @@ def to_clean_float(val):
 
 def recalculate_balances(df):
     """Previous Balance + Deposit - Withdrawal formula se saari rows ka balance recalculate karta hai"""
-    if df is None or df.empty or len(df) == 0:
+    if df is None or df.empty:
         return df
     
     df = df.copy()
-    
-    # Withdrawal aur Deposit ko numeric clean karna
     df['Withdrawal_num'] = df['Withdrawal'].apply(to_clean_float)
     df['Deposit_num'] = df['Deposit'].apply(to_clean_float)
     
-    # Starting base balance nikalna
     first_bal = to_clean_float(df.iloc[0].get('Closing Balance', 0.0))
-    
     new_balances = []
     current_balance = first_bal
     
@@ -46,7 +42,7 @@ def recalculate_balances(df):
     return df
 
 def parse_markdown_table_to_df(table_text):
-    """Markdown table text ko clean pandas DataFrame mein convert karta hai"""
+    """Markdown table ko clean pandas DataFrame mein convert karta hai aur blank/orphan rows filter karta hai"""
     lines = [l.strip() for l in table_text.strip().split("\n") if l.strip().startswith("|") and l.strip().endswith("|")]
     if len(lines) < 2:
         return None
@@ -68,7 +64,7 @@ def parse_markdown_table_to_df(table_text):
         date_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['date', 'dt', 'tareekh'])), raw_df.columns[0])
         clean_df['Date'] = raw_df[date_col]
 
-        # 2. Narration (Single cell cleaning)
+        # 2. Narration (Combined remarks + ref)
         narr_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['narration', 'remark', 'particular', 'description', 'detail'])), None)
         ref_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['ref', 'chq', 'cheque', 'utr', 'txn'])), None)
         
@@ -95,6 +91,17 @@ def parse_markdown_table_to_df(table_text):
         bal_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['balance', 'bal', 'closing'])), None)
         clean_df['Closing Balance'] = raw_df[bal_col].astype(str).str.replace(',', '').str.strip() if bal_col else ""
 
+        # Filter out orphan rows where both Withdrawal and Deposit are empty / 0
+        valid_rows = []
+        for _, r in clean_df.iterrows():
+            w_val = to_clean_float(r['Withdrawal'])
+            d_val = to_clean_float(r['Deposit'])
+            if w_val > 0 or d_val > 0:
+                valid_rows.append(r)
+        
+        if valid_rows:
+            clean_df = pd.DataFrame(valid_rows)
+
         return clean_df[['Date', 'Narration', 'Withdrawal', 'Deposit', 'Closing Balance']]
     except Exception:
         return None
@@ -107,7 +114,7 @@ def dataframe_to_excel_bytes(df):
 
 def show_ai_tab():
     st.header("🤖 BuddyAI Smart Assistant & Live Editor")
-    st.caption("PDF to 5-Column Clean Excel Converter with Auto-Math Running Balance!")
+    st.caption("PDF to 5-Column Clean Excel Converter with Real-Time Reconciliation Cards!")
 
     # Reset / New Session Controls
     col1, col2 = st.columns([4, 1])
@@ -145,7 +152,6 @@ def show_ai_tab():
         if "chat_messages" not in st.session_state:
             st.session_state.chat_messages = []
 
-        # Render Past Messages
         for idx, msg in enumerate(st.session_state.chat_messages):
             role_icon = "🤖" if msg["role"] == "model" else "👤"
             with st.chat_message(msg["role"], avatar=role_icon):
@@ -153,11 +159,35 @@ def show_ai_tab():
                 if msg.get("file_name"):
                     st.caption(f"📎 Attached: *{msg['file_name']}*")
 
-        # Interactive Live Data Editor with Auto-Math
+        # Live Summary Cards & Editor
         if "current_df" in st.session_state and st.session_state.current_df is not None:
+            df = st.session_state.current_df
+            
+            if not df.empty:
+                # Calculations for Summary Cards
+                total_withdrawal = df['Withdrawal'].apply(to_clean_float).sum()
+                total_deposit = df['Deposit'].apply(to_clean_float).sum()
+                
+                first_row_bal = to_clean_float(df.iloc[0].get('Closing Balance', 0.0))
+                first_row_dr = to_clean_float(df.iloc[0].get('Withdrawal', 0.0))
+                first_row_cr = to_clean_float(df.iloc[0].get('Deposit', 0.0))
+                opening_balance = first_row_bal - first_row_cr + first_row_dr
+                
+                closing_balance = to_clean_float(df.iloc[-1].get('Closing Balance', 0.0))
+                expected_closing = opening_balance + total_deposit - total_withdrawal
+                is_balanced = abs(expected_closing - closing_balance) < 0.01
+
+                st.markdown("### 📊 Statement Summary & Reconciliation")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("🟢 Opening Balance", f"₹{opening_balance:,.2f}")
+                m2.metric("💰 Total Deposit (CR)", f"₹{total_deposit:,.2f}")
+                m3.metric("💸 Total Withdrawal (DR)", f"₹{total_withdrawal:,.2f}")
+                m4.metric("🔵 Closing Balance", f"₹{closing_balance:,.2f}", delta="Reconciled ✅" if is_balanced else "Diff Detected ⚠️")
+
+                st.divider()
+
             st.subheader("✏️ On-Screen Live Editor (Math Auto-Calculates on Edit)")
             
-            # Action bar for balancing
             c_calc1, c_calc2 = st.columns([1, 2])
             with c_calc1:
                 if st.button("⚡ Recalculate Running Balance", help="Edits ke baad Balance ko mathematically sync karein"):
@@ -171,7 +201,6 @@ def show_ai_tab():
                 key="live_statement_editor"
             )
             
-            # User edit detect karke state update karna
             if not edited_df.equals(st.session_state.current_df):
                 st.session_state.current_df = edited_df
 
@@ -184,7 +213,7 @@ def show_ai_tab():
                 key="download_btn_editor"
             )
 
-        # Chat Input Box
+        # Chat Input
         if user_prompt := st.chat_input("Statement se Excel banane ke liye prompt likhein..."):
             attached_name = uploaded_file.name if uploaded_file else None
             st.session_state.chat_messages.append({"role": "user", "text": user_prompt, "file_name": attached_name})
@@ -195,7 +224,7 @@ def show_ai_tab():
                     st.caption(f"📎 Attached: *{attached_name}*")
 
             with st.chat_message("model", avatar="🤖"):
-                with st.spinner("Analyzing statement with mathematical Dr/Cr integrity..."):
+                with st.spinner("Extracting transactions and computing reconciliation..."):
                     system_prompt = (
                         "You are an expert Indian Bank Statement OCR and Accounting Engine.\n"
                         "STRICT RULES:\n"
@@ -204,9 +233,9 @@ def show_ai_tab():
                         "2. STRICT DEBIT/CREDIT MAPPING:\n"
                         "   - Money OUT (UPI/DR, DR, WDL, TO TRANSFER, POS, ATM, DEBIT, CHARGES) -> Withdrawal column.\n"
                         "   - Money IN (CR, BY TRANSFER, IMPS CR, SALARY, NEFT, DEPOSIT, INTEREST) -> Deposit column.\n"
-                        "3. RUNNING BALANCE: Extract exact values. Do not invent symbols or omit rows.\n"
+                        "3. SKIP ORPHAN ROWS: Do NOT output rows with zero/empty amounts, sweep notice text, or page headers.\n"
                         "4. Narration MUST combine remarks and transaction reference into a single continuous line.\n"
-                        "5. Zero introductory text, no summary, no account numbers."
+                        "5. Zero introductory text, no summary, no account numbers outside the table."
                     )
                     full_prompt = f"{system_prompt}\n\nUser Request: {user_prompt}"
 
