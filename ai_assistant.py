@@ -5,19 +5,18 @@ import pandas as pd
 import io
 import re
 
-def clean_and_build_excel(table_text):
-    """Markdown table ko strictly 5 columns clean DataFrame aur Excel bytes mein convert karta hai"""
+def parse_markdown_table_to_df(table_text):
+    """Markdown table text ko clean pandas DataFrame mein convert karta hai"""
     lines = [l.strip() for l in table_text.strip().split("\n") if l.strip().startswith("|") and l.strip().endswith("|")]
     if len(lines) < 2:
-        return None, None
+        return None
     
-    # Filter markdown divider lines |---|---|
-    content_lines = [l for l in lines if not re.match(r'^\|(\s*:?-+:?\s*\|)+$', l)]
-    if len(content_lines) < 2:
-        return None, None
+    clean_lines = [l for l in lines if not re.match(r'^\|(\s*:?-+:?\s*\|)+$', l)]
+    if len(clean_lines) < 2:
+        return None
 
     rows = []
-    for l in content_lines:
+    for l in clean_lines:
         cells = [c.strip() for c in l.split("|")[1:-1]]
         rows.append(cells)
 
@@ -25,11 +24,11 @@ def clean_and_build_excel(table_text):
         raw_df = pd.DataFrame(rows[1:], columns=rows[0])
         clean_df = pd.DataFrame()
 
-        # 1. Date Column
+        # 1. Date
         date_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['date', 'dt', 'tareekh'])), raw_df.columns[0])
         clean_df['Date'] = raw_df[date_col]
 
-        # 2. Narration Column (Combine remarks & ref into single cell without newlines)
+        # 2. Narration (Remarks + Ref into single cell)
         narr_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['narration', 'remark', 'particular', 'description', 'detail'])), None)
         ref_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['ref', 'chq', 'cheque', 'utr', 'txn'])), None)
         
@@ -42,7 +41,6 @@ def clean_and_build_excel(table_text):
         else:
             clean_df['Narration'] = ""
 
-        # Single line cleanup for multi-line narration
         clean_df['Narration'] = clean_df['Narration'].astype(str).str.replace(r'[\r\n\t]+', ' ', regex=True).str.replace(r'\s+', ' ', regex=True).str.strip()
 
         # 3. Withdrawal / Debit
@@ -66,23 +64,31 @@ def clean_and_build_excel(table_text):
         else:
             clean_df['Closing Balance'] = ""
 
-        # Enforce exact 5 columns
-        clean_df = clean_df[['Date', 'Narration', 'Withdrawal', 'Deposit', 'Closing Balance']]
-
-        # Create Excel file
-        excel_buffer = io.BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-            clean_df.to_excel(writer, index=False, sheet_name='Bank Statement')
-        
-        return clean_df, excel_buffer.getvalue()
+        return clean_df[['Date', 'Narration', 'Withdrawal', 'Deposit', 'Closing Balance']]
     except Exception:
-        return None, None
+        return None
+
+def dataframe_to_excel_bytes(df):
+    """DataFrame se downloadable Excel byte string banata hai"""
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Bank Statement')
+    return buffer.getvalue()
 
 def show_ai_tab():
-    st.header("🤖 BuddyAI Smart Assistant")
-    st.caption("PDF/Image Statement to Clean Excel Converter — 5 Columns & Ready for Tally XML!")
+    st.header("🤖 BuddyAI Smart Assistant & Live Editor")
+    st.caption("PDF/Image to 5-Column Clean Excel Converter with On-Screen Live Editor!")
 
-    # 1. API Key Setup
+    # Reset / New Session Controls
+    col1, col2 = st.columns([4, 1])
+    with col2:
+        if st.button("🔄 New Statement", help="Clear current session to upload a new statement"):
+            st.session_state.uploader_key = st.session_state.get('uploader_key', 0) + 1
+            st.session_state.chat_messages = []
+            st.session_state.current_df = None
+            st.rerun()
+
+    # API Key Retrieval
     api_key = None
     if "GEMINI_API_KEY" in st.secrets and st.secrets["GEMINI_API_KEY"]:
         api_key = str(st.secrets["GEMINI_API_KEY"]).strip()
@@ -92,51 +98,52 @@ def show_ai_tab():
     if api_key:
         api_key = api_key.strip()
 
-        # 2. File Uploader Section
-        with st.expander("📎 Attach Bank Statement PDF / Screenshot / Invoice", expanded=True):
+        # Dynamic File Uploader
+        current_uploader_key = f"uploader_{st.session_state.get('uploader_key', 0)}"
+        with st.expander("📎 Upload Bank Statement PDF / Screenshot", expanded=True):
             uploaded_file = st.file_uploader(
-                "Upload Statement File (PDF or Image):",
+                "Upload Statement Document (PDF, Image, PNG, JPG):",
                 type=["pdf", "png", "jpg", "jpeg", "csv", "txt"],
-                key="chat_file_uploader"
+                key=current_uploader_key
             )
             if uploaded_file:
                 st.success(f"✅ Selected: **{uploaded_file.name}**")
                 if uploaded_file.type.startswith("image/"):
                     st.image(uploaded_file, caption="Preview", width=220)
 
-        # 3. Chat Session State Setup
+        # Chat History
         if "chat_messages" not in st.session_state:
-            st.session_state.chat_messages = [
-                {
-                    "role": "model",
-                    "text": "Namaste! Main BuddyAI Assistant hoon. Koi bhi **Bank Statement PDF ya Screenshot attach karein**, main seedhe **5 Columns (Date, Narration, Withdrawal, Deposit, Closing Balance)** wali downloadable Excel sheet bana dunga."
-                }
-            ]
+            st.session_state.chat_messages = []
 
-        # Purane messages aur live download buttons display karna
+        # Render Past Messages
         for idx, msg in enumerate(st.session_state.chat_messages):
-            role = msg.get("role", "model")
-            role_icon = "🤖" if role == "model" else "👤"
-            display_text = msg.get("text") or (msg.get("parts")[0] if msg.get("parts") else "")
-            
-            with st.chat_message(role, avatar=role_icon):
-                st.write(display_text)
+            role_icon = "🤖" if msg["role"] == "model" else "👤"
+            with st.chat_message(msg["role"], avatar=role_icon):
+                st.write(msg["text"])
                 if msg.get("file_name"):
                     st.caption(f"📎 Attached: *{msg['file_name']}*")
-                
-                if role == "model":
-                    df, excel_bytes = clean_and_build_excel(display_text)
-                    if excel_bytes is not None:
-                        st.download_button(
-                            label="📥 Download Clean Excel File (.XLSX)",
-                            data=excel_bytes,
-                            file_name=f"Bank_Statement_{idx}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key=f"dl_btn_{idx}"
-                        )
 
-        # 4. User Chat Input
-        if user_prompt := st.chat_input("Statement se Excel sheet banane ke liye enter karein..."):
+        # Interactive Live Data Editor (if DataFrame exists)
+        if "current_df" in st.session_state and st.session_state.current_df is not None:
+            st.subheader("✏️ On-Screen Live Editor (Edit cells directly before download)")
+            edited_df = st.data_editor(
+                st.session_state.current_df,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="live_statement_editor"
+            )
+            
+            excel_bytes = dataframe_to_excel_bytes(edited_df)
+            st.download_button(
+                label="📥 Download Clean & Edited Excel File (.XLSX)",
+                data=excel_bytes,
+                file_name="Bank_Statement_Clean.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_btn_editor"
+            )
+
+        # Chat Input Box
+        if user_prompt := st.chat_input("Statement se Excel banane ke liye prompt likhein..."):
             attached_name = uploaded_file.name if uploaded_file else None
             st.session_state.chat_messages.append({"role": "user", "text": user_prompt, "file_name": attached_name})
             
@@ -146,16 +153,20 @@ def show_ai_tab():
                     st.caption(f"📎 Attached: *{attached_name}*")
 
             with st.chat_message("model", avatar="🤖"):
-                with st.spinner("Extracting strictly 5 columns & generating Excel file..."):
+                with st.spinner("Analyzing statement with strict Dr/Cr and Balance verification..."):
                     system_prompt = (
-                        "You are an automated Bank Statement Parser.\n"
-                        "STRICT RULES:\n"
-                        "1. Output ONLY a clean Markdown Table without any greeting, intro, outro, summary, or account holder info.\n"
-                        "2. Table must start directly from Row 1 with EXACTLY these 5 columns:\n"
+                        "You are an expert Indian Bank Statement OCR and Accounting Engine.\n"
+                        "STRICT COLUMN EXTRACTION RULES:\n"
+                        "1. Output ONLY a clean Markdown Table starting from Row 1 with EXACTLY these 5 headers:\n"
                         "| Date | Narration | Withdrawal | Deposit | Closing Balance |\n"
-                        "3. DO NOT create columns like 'Ref No', 'Cheque No', or 'Txn ID'. If reference numbers exist, append them inside the 'Narration' column text.\n"
-                        "4. Narration MUST be on a single continuous line per row.\n"
-                        "5. Do not include currency symbols (₹, Rs, $). Leave empty withdrawals/deposits blank."
+                        "2. STRICT DEBIT/CREDIT RULES:\n"
+                        "   - If money went OUT (UPI/DR, DR, WDL, TO TRANSFER, POS, ATM, DEBIT, CHARGES) -> Put amount in Withdrawal column.\n"
+                        "   - If money came IN (CR, BY TRANSFER, IMPS CR, SALARY, NEFT, DEPOSIT, INTEREST) -> Put amount in Deposit column.\n"
+                        "   - Do not invert Debit and Credit.\n"
+                        "3. RUNNING BALANCE INTEGRITY:\n"
+                        "   - Read the exact Running/Closing Balance column from the statement. Do not fabricate math if it mismatches.\n"
+                        "4. Narration MUST combine multi-line remarks, reference numbers, and beneficiary names into ONE SINGLE line per row.\n"
+                        "5. NO account numbers, summary lines, or extra introductory/outro text outside the markdown table."
                     )
                     full_prompt = f"{system_prompt}\n\nUser Request: {user_prompt}"
 
@@ -212,17 +223,12 @@ def show_ai_tab():
                         st.write(reply_text)
                         st.session_state.chat_messages.append({"role": "model", "text": reply_text})
                         
-                        # Generate Download Button Live
-                        df, excel_bytes = clean_and_build_excel(reply_text)
-                        if excel_bytes is not None:
-                            st.download_button(
-                                label="📥 Download Clean Excel File (.XLSX)",
-                                data=excel_bytes,
-                                file_name="Bank_Statement_Clean.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                key=f"dl_btn_live_{len(st.session_state.chat_messages)}"
-                            )
+                        # Parse table and feed into Live Editor
+                        parsed_df = parse_markdown_table_to_df(reply_text)
+                        if parsed_df is not None:
+                            st.session_state.current_df = parsed_df
+                            st.rerun()
                     else:
-                        st.error(f"❌ Error generating response: {last_error}")
+                        st.error(f"❌ Error: {last_error}")
     else:
-        st.info("💡 Tip: AI Assistant activate karne ke liye Streamlit Cloud Secrets mein `GEMINI_API_KEY` configure karein.")
+        st.info("💡 Tip: AI Assistant activate karne ke liye Streamlit Cloud Secrets mein `GEMINI_API_KEY` set karein.")
