@@ -5,6 +5,46 @@ import pandas as pd
 import io
 import re
 
+def to_clean_float(val):
+    """String amount ko safe float number mein convert karta hai"""
+    if pd.isna(val):
+        return 0.0
+    s = str(val).replace(',', '').replace('₹', '').replace('Rs.', '').replace(' ', '').strip()
+    try:
+        return float(s) if s else 0.0
+    except ValueError:
+        return 0.0
+
+def recalculate_balances(df):
+    """Previous Balance + Deposit - Withdrawal formula se saari rows ka balance recalculate karta hai"""
+    if df is None or df.empty or len(df) == 0:
+        return df
+    
+    df = df.copy()
+    
+    # Withdrawal aur Deposit ko numeric clean karna
+    df['Withdrawal_num'] = df['Withdrawal'].apply(to_clean_float)
+    df['Deposit_num'] = df['Deposit'].apply(to_clean_float)
+    
+    # Starting base balance nikalna
+    first_bal = to_clean_float(df.iloc[0].get('Closing Balance', 0.0))
+    
+    new_balances = []
+    current_balance = first_bal
+    
+    for i in range(len(df)):
+        if i == 0:
+            new_balances.append(f"{current_balance:,.2f}")
+        else:
+            w_amt = df.iloc[i]['Withdrawal_num']
+            d_amt = df.iloc[i]['Deposit_num']
+            current_balance = current_balance + d_amt - w_amt
+            new_balances.append(f"{current_balance:,.2f}")
+            
+    df['Closing Balance'] = new_balances
+    df = df.drop(columns=['Withdrawal_num', 'Deposit_num'])
+    return df
+
 def parse_markdown_table_to_df(table_text):
     """Markdown table text ko clean pandas DataFrame mein convert karta hai"""
     lines = [l.strip() for l in table_text.strip().split("\n") if l.strip().startswith("|") and l.strip().endswith("|")]
@@ -28,7 +68,7 @@ def parse_markdown_table_to_df(table_text):
         date_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['date', 'dt', 'tareekh'])), raw_df.columns[0])
         clean_df['Date'] = raw_df[date_col]
 
-        # 2. Narration (Remarks + Ref into single cell)
+        # 2. Narration (Single cell cleaning)
         narr_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['narration', 'remark', 'particular', 'description', 'detail'])), None)
         ref_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['ref', 'chq', 'cheque', 'utr', 'txn'])), None)
         
@@ -43,33 +83,23 @@ def parse_markdown_table_to_df(table_text):
 
         clean_df['Narration'] = clean_df['Narration'].astype(str).str.replace(r'[\r\n\t]+', ' ', regex=True).str.replace(r'\s+', ' ', regex=True).str.strip()
 
-        # 3. Withdrawal / Debit
+        # 3. Withdrawal
         dr_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['withdraw', 'debit', 'dr', 'out'])), None)
-        if dr_col:
-            clean_df['Withdrawal'] = raw_df[dr_col].astype(str).str.replace(',', '').str.replace('-', '').str.strip()
-        else:
-            clean_df['Withdrawal'] = ""
+        clean_df['Withdrawal'] = raw_df[dr_col].astype(str).str.replace(',', '').str.replace('-', '').str.strip() if dr_col else ""
 
-        # 4. Deposit / Credit
+        # 4. Deposit
         cr_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['deposit', 'credit', 'cr', 'in'])), None)
-        if cr_col:
-            clean_df['Deposit'] = raw_df[cr_col].astype(str).str.replace(',', '').str.replace('-', '').str.strip()
-        else:
-            clean_df['Deposit'] = ""
+        clean_df['Deposit'] = raw_df[cr_col].astype(str).str.replace(',', '').str.replace('-', '').str.strip() if cr_col else ""
 
         # 5. Closing Balance
         bal_col = next((c for c in raw_df.columns if any(k in c.lower() for k in ['balance', 'bal', 'closing'])), None)
-        if bal_col:
-            clean_df['Closing Balance'] = raw_df[bal_col].astype(str).str.replace(',', '').str.strip()
-        else:
-            clean_df['Closing Balance'] = ""
+        clean_df['Closing Balance'] = raw_df[bal_col].astype(str).str.replace(',', '').str.strip() if bal_col else ""
 
         return clean_df[['Date', 'Narration', 'Withdrawal', 'Deposit', 'Closing Balance']]
     except Exception:
         return None
 
 def dataframe_to_excel_bytes(df):
-    """DataFrame se downloadable Excel byte string banata hai"""
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Bank Statement')
@@ -77,7 +107,7 @@ def dataframe_to_excel_bytes(df):
 
 def show_ai_tab():
     st.header("🤖 BuddyAI Smart Assistant & Live Editor")
-    st.caption("PDF/Image to 5-Column Clean Excel Converter with On-Screen Live Editor!")
+    st.caption("PDF to 5-Column Clean Excel Converter with Auto-Math Running Balance!")
 
     # Reset / New Session Controls
     col1, col2 = st.columns([4, 1])
@@ -123,9 +153,17 @@ def show_ai_tab():
                 if msg.get("file_name"):
                     st.caption(f"📎 Attached: *{msg['file_name']}*")
 
-        # Interactive Live Data Editor (if DataFrame exists)
+        # Interactive Live Data Editor with Auto-Math
         if "current_df" in st.session_state and st.session_state.current_df is not None:
-            st.subheader("✏️ On-Screen Live Editor (Edit cells directly before download)")
+            st.subheader("✏️ On-Screen Live Editor (Math Auto-Calculates on Edit)")
+            
+            # Action bar for balancing
+            c_calc1, c_calc2 = st.columns([1, 2])
+            with c_calc1:
+                if st.button("⚡ Recalculate Running Balance", help="Edits ke baad Balance ko mathematically sync karein"):
+                    st.session_state.current_df = recalculate_balances(st.session_state.current_df)
+                    st.rerun()
+
             edited_df = st.data_editor(
                 st.session_state.current_df,
                 num_rows="dynamic",
@@ -133,9 +171,13 @@ def show_ai_tab():
                 key="live_statement_editor"
             )
             
-            excel_bytes = dataframe_to_excel_bytes(edited_df)
+            # User edit detect karke state update karna
+            if not edited_df.equals(st.session_state.current_df):
+                st.session_state.current_df = edited_df
+
+            excel_bytes = dataframe_to_excel_bytes(recalculate_balances(edited_df))
             st.download_button(
-                label="📥 Download Clean & Edited Excel File (.XLSX)",
+                label="📥 Download Clean & Balanced Excel (.XLSX)",
                 data=excel_bytes,
                 file_name="Bank_Statement_Clean.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -153,20 +195,18 @@ def show_ai_tab():
                     st.caption(f"📎 Attached: *{attached_name}*")
 
             with st.chat_message("model", avatar="🤖"):
-                with st.spinner("Analyzing statement with strict Dr/Cr and Balance verification..."):
+                with st.spinner("Analyzing statement with mathematical Dr/Cr integrity..."):
                     system_prompt = (
                         "You are an expert Indian Bank Statement OCR and Accounting Engine.\n"
-                        "STRICT COLUMN EXTRACTION RULES:\n"
+                        "STRICT RULES:\n"
                         "1. Output ONLY a clean Markdown Table starting from Row 1 with EXACTLY these 5 headers:\n"
                         "| Date | Narration | Withdrawal | Deposit | Closing Balance |\n"
-                        "2. STRICT DEBIT/CREDIT RULES:\n"
-                        "   - If money went OUT (UPI/DR, DR, WDL, TO TRANSFER, POS, ATM, DEBIT, CHARGES) -> Put amount in Withdrawal column.\n"
-                        "   - If money came IN (CR, BY TRANSFER, IMPS CR, SALARY, NEFT, DEPOSIT, INTEREST) -> Put amount in Deposit column.\n"
-                        "   - Do not invert Debit and Credit.\n"
-                        "3. RUNNING BALANCE INTEGRITY:\n"
-                        "   - Read the exact Running/Closing Balance column from the statement. Do not fabricate math if it mismatches.\n"
-                        "4. Narration MUST combine multi-line remarks, reference numbers, and beneficiary names into ONE SINGLE line per row.\n"
-                        "5. NO account numbers, summary lines, or extra introductory/outro text outside the markdown table."
+                        "2. STRICT DEBIT/CREDIT MAPPING:\n"
+                        "   - Money OUT (UPI/DR, DR, WDL, TO TRANSFER, POS, ATM, DEBIT, CHARGES) -> Withdrawal column.\n"
+                        "   - Money IN (CR, BY TRANSFER, IMPS CR, SALARY, NEFT, DEPOSIT, INTEREST) -> Deposit column.\n"
+                        "3. RUNNING BALANCE: Extract exact values. Do not invent symbols or omit rows.\n"
+                        "4. Narration MUST combine remarks and transaction reference into a single continuous line.\n"
+                        "5. Zero introductory text, no summary, no account numbers."
                     )
                     full_prompt = f"{system_prompt}\n\nUser Request: {user_prompt}"
 
@@ -223,7 +263,6 @@ def show_ai_tab():
                         st.write(reply_text)
                         st.session_state.chat_messages.append({"role": "model", "text": reply_text})
                         
-                        # Parse table and feed into Live Editor
                         parsed_df = parse_markdown_table_to_df(reply_text)
                         if parsed_df is not None:
                             st.session_state.current_df = parsed_df
