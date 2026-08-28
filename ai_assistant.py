@@ -4,9 +4,10 @@ import base64
 import pandas as pd
 import io
 import re
+import os
 
 def to_clean_float(val):
-    """String amount ko safe float number mein convert karta hai"""
+    """String amount ko safe numeric float mein convert karta hai"""
     if pd.isna(val):
         return 0.0
     s = str(val).replace(',', '').replace('₹', '').replace('Rs.', '').replace(' ', '').strip()
@@ -16,7 +17,7 @@ def to_clean_float(val):
         return 0.0
 
 def recalculate_balances(df):
-    """Previous Balance + Deposit - Withdrawal formula se saari rows ka balance sync karta hai"""
+    """Previous Balance + Deposit - Withdrawal formula se balance sync karta hai"""
     if df is None or df.empty:
         return df
     
@@ -117,19 +118,60 @@ def dataframe_to_excel_bytes(df):
     return buffer.getvalue()
 
 def show_ai_tab():
-    st.header("🤖 BuddyAI Smart Assistant & Live Editor")
-    st.caption("PDF Statement to 5-Column Clean Excel with Real-Time Summary Dashboard!")
+    # -------------------------------------------------------------
+    # 📦 INDEPENDENT BUDDYTDL EXPANDER (TOP OF SCREEN)
+    # -------------------------------------------------------------
+    with st.expander("📦 BuddyTDL: Tally Prime 1-Click Auto Import Add-on", expanded=False):
+        c_tdl1, c_tdl2 = st.columns([1.5, 2])
+        
+        with c_tdl1:
+            st.markdown("#### 📥 Download Add-on Files")
+            tdl_file = "Repotic-TDL.tcp" if os.path.exists("Repotic-TDL.tcp") else ("BuddyTDL.tcp" if os.path.exists("BuddyTDL.tcp") else None)
+            if tdl_file:
+                with open(tdl_file, "rb") as f:
+                    st.download_button(
+                        label="📥 Download BuddyTDL.tcp",
+                        data=f.read(),
+                        file_name="BuddyTDL.tcp",
+                        mime="application/octet-stream",
+                        use_container_width=True
+                    )
+            
+            pdf_file = "Tally TDL Guide.pdf" if os.path.exists("Tally TDL Guide.pdf") else None
+            if pdf_file:
+                with open(pdf_file, "rb") as f:
+                    st.download_button(
+                        label="📄 Download Setup Guide (PDF)",
+                        data=f.read(),
+                        file_name="BuddyTDL_Setup_Guide.pdf",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
 
-    # Reset Session Controls
-    col1, col2 = st.columns([4, 1])
-    with col2:
-        if st.button("🔄 New Statement", help="Naya statement upload karne ke liye session clear karein"):
+        with c_tdl2:
+            st.markdown("#### ⚙️ Quick Tally Prime Setup")
+            st.caption("""
+            1. **`BuddyTDL.tcp`** download karke apne PC folder mein rakhein.
+            2. Tally Prime mein **F1 (Help)** -> **TDLs & Add-Ons** -> **F4 (Manage Local TDLs)** press karein.
+            3. **Load selected TDL files** ko `Yes` karein aur file select karein.
+            4. Tally Gateway par BuddyTDL menu se Excel file direct import karein.
+            """)
+
+    # -------------------------------------------------------------
+    # HEADER & RESET BUTTON
+    # -------------------------------------------------------------
+    head_col, reset_col = st.columns([4, 1])
+    with head_col:
+        st.subheader("🤖 BuddyAI Smart Assistant & Live Editor")
+        st.caption("PDF Statement to Clean 5-Column Excel with Auto Math Balancing")
+    with reset_col:
+        if st.button("🔄 New Statement", help="Naya statement upload karne ke liye clear karein"):
             st.session_state.uploader_key = st.session_state.get('uploader_key', 0) + 1
             st.session_state.chat_messages = []
             st.session_state.current_df = None
             st.rerun()
 
-    # API Key Retrieval
+    # API Key Handling
     api_key = None
     if "GEMINI_API_KEY" in st.secrets and st.secrets["GEMINI_API_KEY"]:
         api_key = str(st.secrets["GEMINI_API_KEY"]).strip()
@@ -139,11 +181,11 @@ def show_ai_tab():
     if api_key:
         api_key = api_key.strip()
 
-        # Dynamic File Uploader
+        # Statement Upload
         current_uploader_key = f"uploader_{st.session_state.get('uploader_key', 0)}"
         with st.expander("📎 Upload Bank Statement PDF / Screenshot", expanded=True):
             uploaded_file = st.file_uploader(
-                "Upload Statement Document (PDF, Image, PNG, JPG):",
+                "Upload Statement Document (PDF, PNG, JPG, CSV):",
                 type=["pdf", "png", "jpg", "jpeg", "csv", "txt"],
                 key=current_uploader_key
             )
@@ -152,18 +194,14 @@ def show_ai_tab():
                 if uploaded_file.type.startswith("image/"):
                     st.image(uploaded_file, caption="Preview", width=220)
 
-        # Chat History
         if "chat_messages" not in st.session_state:
             st.session_state.chat_messages = []
 
-        # -------------------------------------------------------------
-        # 📊 SUMMARY CARDS & LIVE DATA EDITOR (RENDERED PROMINENTLY)
-        # -------------------------------------------------------------
+        # Summary Dashboard & Editor
         if "current_df" in st.session_state and st.session_state.current_df is not None:
             df = st.session_state.current_df
             
             if not df.empty:
-                # Math calculation for metrics
                 w_col = 'Withdrawal' if 'Withdrawal' in df.columns else df.columns[2]
                 d_col = 'Deposit' if 'Deposit' in df.columns else df.columns[3]
                 b_col = 'Closing Balance' if 'Closing Balance' in df.columns else df.columns[4]
@@ -193,7 +231,7 @@ def show_ai_tab():
             
             c_calc1, c_calc2 = st.columns([1, 2])
             with c_calc1:
-                if st.button("⚡ Recalculate Running Balance", help="Balance ko mathematically sync karein"):
+                if st.button("⚡ Recalculate Running Balance", help="Balance ko sync karein"):
                     st.session_state.current_df = recalculate_balances(st.session_state.current_df)
                     st.rerun()
 
@@ -217,7 +255,7 @@ def show_ai_tab():
             )
             st.divider()
 
-        # Render Past Messages
+        # Chat Messages History
         for idx, msg in enumerate(st.session_state.chat_messages):
             role_icon = "🤖" if msg["role"] == "model" else "👤"
             with st.chat_message(msg["role"], avatar=role_icon):
@@ -236,10 +274,10 @@ def show_ai_tab():
                     st.caption(f"📎 Attached: *{attached_name}*")
 
             with st.chat_message("model", avatar="🤖"):
-                with st.spinner("Analyzing statement with mathematical Dr/Cr verification..."):
+                with st.spinner("Extracting transactions and computing reconciliation..."):
                     system_prompt = (
                         "You are an expert Indian Bank Statement OCR and Accounting Engine.\n"
-                        "STRICT EXTRACTION RULES:\n"
+                        "STRICT RULES:\n"
                         "1. Output ONLY a clean Markdown Table starting from Row 1 with EXACTLY these 5 headers:\n"
                         "| Date | Narration | Withdrawal | Deposit | Closing Balance |\n"
                         "2. DEBIT/CREDIT RULES:\n"
